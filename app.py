@@ -1,8 +1,7 @@
 """app.py — Streamlit UI: Modul Ajar Generator (No-API, Paste-to-Claude).
 
 Flow:
-  STEP 0: Build CP prompt -> paste CP JSON dari Claude -> edit CP
-  STEP 1: Build modul prompt (CP otomatis masuk)
+  STEP 1: Build modul prompt (CP otomatis dari CP_GRAPH)
   STEP 2: Copy modul prompt ke Claude
   STEP 3: Paste modul JSON -> preview -> export DOCX
 """
@@ -12,9 +11,9 @@ import pandas as pd
 import streamlit as st
 
 from ai_modul import (
-    build_cp_prompt, build_modul_prompt,
-    _normalize, _normalize_cp, _parse_json,
-    BLOOM_LEVELS,
+    build_modul_prompt,
+    _normalize, _parse_json,
+    BLOOM_LEVELS, SUBJECTS, get_cp,
 )
 from docx_io import export_docx
 from file_io import extract_text_from_file
@@ -45,8 +44,6 @@ if "modul_info" not in st.session_state:
     st.session_state["modul_info"] = {}
 if "prompt_ready" not in st.session_state:
     st.session_state["prompt_ready"] = None
-if "cp_prompt_ready" not in st.session_state:
-    st.session_state["cp_prompt_ready"] = None
 if "cp_list" not in st.session_state:
     st.session_state["cp_list"] = []
 if "meetings_list" not in st.session_state:
@@ -61,7 +58,7 @@ if "meetings_list" not in st.session_state:
 # SIDEBAR
 # =========================================================
 st.sidebar.title("📄 1. Upload Referensi (Opsional)")
-st.sidebar.caption("Upload Silabus/ATP untuk memperkaya prompt CP & Modul.")
+st.sidebar.caption("Upload Silabus/ATP untuk memperkaya prompt modul.")
 
 uploaded_doc = st.sidebar.file_uploader(
     "Pilih file (PDF/DOCX/TXT)",
@@ -80,7 +77,14 @@ if uploaded_doc:
 st.sidebar.divider()
 st.sidebar.title("🏫 2. Identitas Modul")
 teacher = st.sidebar.text_input("Nama Guru", value="Frederick Liko, S.Kom.", key="in_teacher")
-subject = st.sidebar.text_input("Mata Pelajaran", value="Health and Physical Education", key="in_subject")
+
+# Subject dropdown (Mathematics / Computer Science / Health and Physical Education)
+subject = st.sidebar.selectbox(
+    "Mata Pelajaran",
+    SUBJECTS,
+    index=2,               # default: Health and Physical Education
+    key="in_subject_sel",
+)
 
 jenjang = st.sidebar.selectbox(
     "Jenjang Pendidikan (Untuk Judul)",
@@ -128,6 +132,7 @@ st.sidebar.info(
     "ℹ️ **Mode No-API**\n\n"
     "Prompt dibangun **lokal**, Anda paste ke **Claude.ai**, "
     "lalu paste JSON balik ke app ini untuk **export DOCX**.\n\n"
+    "CP otomatis dimuat dari **CP_GRAPH** (Fase / Kelas / Subject).\n\n"
     "Tidak ada API key, tidak ada biaya otomatis."
 )
 
@@ -137,8 +142,9 @@ st.sidebar.info(
 # =========================================================
 st.title("📚 Modul Ajar Generator")
 st.markdown(
-    "**Flow:** STEP 0 (generate CP) → STEP 1 (build prompt modul) → "
-    "STEP 2 (copy ke Claude) → STEP 3 (paste JSON balik) → Export DOCX."
+    "**Flow:** STEP 1 (build prompt modul) → STEP 2 (copy ke Claude) → "
+    "STEP 3 (paste JSON balik) → Export DOCX. "
+    "CP otomatis dimuat dari **CP_GRAPH**."
 )
 
 for i, m in enumerate(st.session_state["meetings_list"]):
@@ -180,88 +186,52 @@ st.divider()
 
 
 # =========================================================
-# STEP 0 — Capaian Pembelajaran (CP)
+# AUTO-LOAD CP (silent) dari CP_GRAPH
 # =========================================================
-st.header("🎯 STEP 0 — Capaian Pembelajaran (CP)")
-st.caption("Generate CP via Claude, review, lalu CP ini akan dipakai sebagai konteks saat build modul.")
+cp_key = (
+    str(phase).strip().upper(),
+    str(class_level).strip().upper(),
+    str(subject).strip(),
+)
+if st.session_state.get("_cp_key") != cp_key:
+    st.session_state["_cp_key"] = cp_key
+    st.session_state["cp_list"] = get_cp(phase, class_level, subject)
+    st.session_state.pop("cp_edit_box", None)
 
-if st.button("📝 STEP 0a — Build CP Prompt", use_container_width=True):
-    empty_topics = [m["number"] for m in st.session_state["meetings_list"] if not m["topic"].strip()]
-    if empty_topics:
-        st.error(f"Topik Meeting {', '.join(map(str, empty_topics))} masih kosong. Isi dulu di atas.")
+# Expander ringkas untuk review / edit CP (opsional)
+cp_current = st.session_state.get("cp_list", [])
+with st.expander(
+    f"🎯 Capaian Pembelajaran — {len(cp_current)} item "
+    f"(Fase {phase} · {class_level} · {subject}) — klik untuk lihat/edit",
+    expanded=False,
+):
+    if cp_current:
+        st.caption(
+            f"CP dimuat otomatis dari `CP_GRAPH` untuk "
+            f"Fase **{phase}** / Kelas **{class_level}** / **{subject}**. "
+            "Bisa diedit di bawah (satu CP per baris)."
+        )
     else:
-        try:
-            cp_prompt = build_cp_prompt(
-                subject=subject, class_level=class_level, phase=phase,
-                duration=duration, term=term,
-                meetings=st.session_state["meetings_list"],
-                reference_text=ref_text,
-            )
-            st.session_state["cp_prompt_ready"] = cp_prompt
-            st.success("✅ CP prompt siap. Copy ke Claude (lihat kotak di bawah).")
-        except Exception as e:
-            st.error(f"Gagal build CP prompt: {e}")
+        st.caption(
+            f"CP untuk Fase **{phase}** / Kelas **{class_level}** / **{subject}** "
+            "masih kosong. Silakan isi manual di bawah, "
+            "atau tambahkan di `CP_GRAPH` pada `ai_modul.py`."
+        )
 
-if st.session_state.get("cp_prompt_ready"):
-    st.markdown("**📋 CP Prompt — Copy ke Claude.ai**")
-    st.info(
-        "1. Klik **Copy** di pojok kanan atas kotak hitam\n"
-        "2. Paste ke [claude.ai](https://claude.ai)\n"
-        "3. Copy hasil JSON (`{` pertama sampai `}` terakhir)\n"
-        "4. Paste di kotak **STEP 0b** di bawah"
-    )
-    st.code(st.session_state["cp_prompt_ready"], language="text")
-    st.download_button(
-        "⬇️ Download CP Prompt (.txt)",
-        data=st.session_state["cp_prompt_ready"],
-        file_name="prompt_cp.txt",
-        mime="text/plain",
-        use_container_width=True,
-    )
-
-    st.markdown("**📥 STEP 0b — Paste Hasil CP dari Claude (JSON)**")
-    cp_pasted = st.text_area(
-        "Paste JSON CP di sini:",
-        height=180, key="cp_pasted_json",
-        placeholder='{"capaian_pembelajaran": ["Peserta didik mampu ...", ...]}',
-    )
-    if st.button("🔍 Parse CP", type="primary", use_container_width=True):
-        if not cp_pasted or not cp_pasted.strip():
-            st.error("Kotak paste masih kosong.")
-        else:
-            try:
-                parsed_cp = _parse_json(cp_pasted)
-                cp_list = _normalize_cp(parsed_cp)
-                if not cp_list:
-                    st.error("Tidak ada CP terdeteksi. Pastikan JSON berisi 'capaian_pembelajaran'.")
-                else:
-                    st.session_state["cp_list"] = cp_list
-                    st.success(f"✅ {len(cp_list)} CP berhasil di-parse.")
-                    st.rerun()
-            except json.JSONDecodeError as e:
-                st.error("❌ JSON tidak valid: " + str(e) + "\nPastikan copy dari `{` pertama sampai `}` terakhir.")
-
-if st.session_state.get("cp_list"):
-    st.markdown("---")
-    st.markdown(f"**✅ CP Aktif — {len(st.session_state['cp_list'])} item (bisa diedit)**")
-    cp_text_current = "\n".join(st.session_state["cp_list"])
+    cp_text_current = "\n".join(cp_current)
     edited_cp = st.text_area(
         "Satu CP per baris. Kosongkan baris yang tidak dipakai.",
         value=cp_text_current, height=200, key="cp_edit_box",
+        label_visibility="collapsed",
     )
     new_cp_list = [line.strip() for line in edited_cp.split("\n") if line.strip()]
-    if new_cp_list != st.session_state["cp_list"]:
+    if new_cp_list != cp_current:
         st.session_state["cp_list"] = new_cp_list
+
     if len(new_cp_list) < 5:
-        st.warning(f"⚠️ CP saat ini {len(new_cp_list)} item. Rekomendasi minimal 5.")
+        st.caption(f"⚠️ {len(new_cp_list)} CP — rekomendasi minimal 5.")
     else:
         st.caption(f"✅ {len(new_cp_list)} CP — OK (minimal 5 terpenuhi).")
-    if st.button("🧹 Hapus Semua CP", use_container_width=True):
-        st.session_state["cp_list"] = []
-        st.session_state.pop("cp_edit_box", None)
-        st.rerun()
-
-st.divider()
 
 
 # =========================================================
@@ -275,7 +245,7 @@ if st.button("🚀 Build Prompt Modul", type="primary", use_container_width=True
         st.error(f"Topik Meeting {', '.join(map(str, empty_topics))} masih kosong!")
     else:
         if not st.session_state.get("cp_list"):
-            st.warning("⚠️ Belum ada CP. Modul tetap bisa di-generate, tapi lebih baik isi STEP 0 dulu.")
+            st.warning("⚠️ Belum ada CP. Modul tetap bisa di-generate, tapi lebih baik isi CP dulu.")
         try:
             prompt = build_modul_prompt(
                 teacher=teacher, subject=subject, class_level=class_level,
@@ -346,7 +316,7 @@ if st.session_state.get("prompt_ready"):
                     parsed = _parse_json(pasted)
                     normalized = _normalize(parsed, st.session_state["meetings_list"])
 
-                    # Inject CP dari STEP 0 ke learning_outcomes
+                    # Inject CP dari CP_GRAPH ke learning_outcomes
                     cp_list = st.session_state.get("cp_list", [])
                     if cp_list:
                         normalized["learning_outcomes"] = "\n".join(
@@ -413,7 +383,6 @@ if data:
 
             meetings.append({**m, "stages": stages, "objectives": objs})
 
-        # learning_outcomes diambil dari edited text area kalau ada
         lo_edited = get("e_lo", data["learning_outcomes"])
 
         return {
@@ -433,7 +402,7 @@ if data:
 
     with tab1:
         st.text_area(
-            "Capaian Pembelajaran (dari STEP 0, bisa diedit)",
+            "Capaian Pembelajaran (dari CP_GRAPH, bisa diedit)",
             value=data["learning_outcomes"], height=180, key="e_lo",
         )
         st.markdown("**Prior Knowledge**")
@@ -566,7 +535,7 @@ st.markdown(
     ">
         © {current_year} <strong> Frederick Sensei </strong> — All Rights Reserved.<br>
         <span style="font-size: 12px;">
-            Modul Ajar Generator (No-API Mode · CP via Claude)
+            Modul Ajar Generator (No-API Mode · CP dari CP_GRAPH)
         </span>
     </div>
     """,

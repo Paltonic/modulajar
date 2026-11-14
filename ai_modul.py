@@ -1,8 +1,8 @@
-"""ai_modul.py — Modul Ajar prompt builder + CP generator (No-API mode, English Cambridge).
+"""ai_modul.py — Modul Ajar prompt builder (No-API mode, English Cambridge).
 
 Tidak ada panggilan API. Semua interaksi AI dilakukan manual via Claude.ai.
-Website pemerintah (guru.kemendikdasmen.go.id) tidak dipakai lagi.
-CP (Capaian Pembelajaran) ditulis dalam English Cambridge style.
+CP (Capaian Pembelajaran) sekarang diambil dari CP_GRAPH berdasarkan
+(phase, class_level, subject) — bukan lagi di-generate via prompt.
 """
 import json
 import re
@@ -64,113 +64,69 @@ KIRITSU_CLOSING = (
 
 
 # =========================================================
-# STEP 0 — PROMPT CAPAIAN PEMBELAJARAN (CP) — English Cambridge
+# SUBJECTS & CP GRAPH
 # =========================================================
-CP_PROMPT_TEMPLATE = """You are a curriculum designer at Nakamura School using the Cambridge International Curriculum (Cambridge Lower Secondary / IGCSE standards), aligned with the Indonesian Kurikulum Merdeka framework.
+SUBJECTS = [
+    "Mathematics",
+    "Computer Science",
+    "Health and Physical Education",
+]
 
-Generate CAPAIAN PEMBELAJARAN (Learning Outcomes) for the following context.
-
-=== CONTEXT ===
-Subject         : {subject}
-Class / Phase   : {class_level} / Fase {phase}
-Duration        : {duration}
-Term            : {term}
-
-=== TOPICS (from meetings) ===
-{meetings_str}
-
-=== REFERENCE DOCUMENT ===
-{reference_text}
-
-=== TASKS ===
-Generate MINIMUM 5 Learning Outcomes (CP) — recommended 5-8 items.
-
-Each Learning Outcome MUST:
-- Be written in FORMAL ACADEMIC ENGLISH (Cambridge style, NOT Bahasa Indonesia).
-- Start with: "Students are able to ..." OR "Students can ..." OR "Students will be able to ...".
-- Use ONE Cambridge-style action verb from Bloom's taxonomy, in ENGLISH:
-  * Remembering: identify, recall, list, name, define
-  * Understanding: explain, describe, summarise, classify, interpret
-  * Applying: apply, demonstrate, use, implement, solve
-  * Analyzing: analyse, compare, differentiate, examine, investigate
-  * Evaluating: evaluate, justify, critique, assess, judge
-  * Creating: design, create, construct, develop, produce
-- Be specific to ONE or MORE of the topics listed above (NOT generic).
-- Cover a balanced mix of: Knowledge (conceptual understanding), Skills (procedural / practical), and Application (real-world / Cambridge "learning objective" style).
-- Be 1-2 sentences each. Distinct from one another (no repetition).
-- NOT numbered (the app will number them automatically).
-- Include a domain label prefix in square brackets at the START of each CP:
-  [Knowledge]   — conceptual understanding
-  [Skill]       — procedural / practical ability
-  [Application] — real-world use / transfer
-
-Cambridge learning objective style examples:
-- "[Knowledge] Students are able to explain the fundamental concepts of artificial intelligence and its historical development."
-- "[Skill] Students are able to apply a basic classification algorithm to a simple dataset and interpret the results."
-- "[Application] Students are able to design a simple AI-assisted solution to a real-world problem and present it to peers."
-
-=== OUTPUT (STRICT JSON, no markdown fences) ===
-{{
-  "capaian_pembelajaran": [
-    "[Knowledge] Students are able to ...",
-    "[Skill] Students are able to ...",
-    "[Application] Students are able to ...",
-    "[Knowledge] Students are able to ...",
-    "[Skill] Students are able to ..."
-  ]
-}}
-
-=== FINAL INSTRUCTION ===
-Respond with the JSON object ONLY. No preamble, no explanation, no markdown fences.
-"""
+# CP Graph: phase → class_level → subject → list of CP strings.
+# Empty list [] = "kosongkan" (bisa diisi manual di UI, atau isi nanti di sini).
+#
+# Konvensi class_level:
+#   Fase A (SD 1-2)     → K1, K2
+#   Fase B (SD 3-4)     → K3, K4
+#   Fase C (SD 5-6)     → K5, K6
+#   Fase D (SMP 7-9)    → J1, J2, J3
+#   Fase E (SMA/SMK 10) → S1
+#   Fase F (SMA/SMK 11-12) → S2, S3
+#
+# Contoh pengisian:
+#   "Mathematics": [
+#       "[Knowledge] Students are able to explain ...",
+#       "[Skill] Students are able to apply ...",
+#   ]
+CP_GRAPH = {
+    "A": {
+        "K1": {s: [] for s in SUBJECTS},
+        "K2": {s: [] for s in SUBJECTS},
+    },
+    "B": {
+        "K3": {s: [] for s in SUBJECTS},
+        "K4": {s: [] for s in SUBJECTS},
+    },
+    "C": {
+        "K5": {s: [] for s in SUBJECTS},
+        "K6": {s: [] for s in SUBJECTS},
+    },
+    "D": {
+        "J1": {s: [] for s in SUBJECTS},
+        "J2": {s: [] for s in SUBJECTS},
+        "J3": {s: [] for s in SUBJECTS},
+    },
+    "E": {
+        "S1": {s: [] for s in SUBJECTS},
+    },
+    "F": {
+        "S2": {s: [] for s in SUBJECTS},
+        "S3": {s: [] for s in SUBJECTS},
+    },
+}
 
 
-def build_cp_prompt(subject, class_level, phase, duration, term,
-                    meetings, reference_text=""):
-    """Bangun prompt CP (English Cambridge) dari topik-topik di meetings_list."""
-    meetings_str = ""
-    for m in meetings:
-        meetings_str += (
-            f"- Meeting {m['number']}: {m.get('topic', '(no topic)')} "
-            f"(Level: {m.get('level', '-')})\n"
-        )
-    ref = reference_text[:4000] if reference_text else "(No document provided)"
-    return CP_PROMPT_TEMPLATE.format(
-        subject=subject, class_level=class_level, phase=phase,
-        duration=duration, term=term,
-        meetings_str=meetings_str, reference_text=ref,
-    )
+def get_cp(phase, class_level, subject):
+    """Ambil list CP dari CP_GRAPH berdasarkan (phase, class_level, subject).
 
-
-def _normalize_cp(data):
-    """Ubah respon JSON Claude jadi list string CP. Robust ke berbagai format."""
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        items = (
-            data.get("capaian_pembelajaran")
-            or data.get("cp")
-            or data.get("learning_outcomes")
-            or data.get("items")
-            or []
-        )
-        if isinstance(items, str):
-            items = [items]
-    elif isinstance(data, str):
-        items = [data]
-    else:
-        items = []
-
-    result = []
-    for x in items:
-        if isinstance(x, dict):
-            x = x.get("teks") or x.get("text") or x.get("cp") or str(x)
-        s = str(x).strip()
-        # Hapus prefix nomor kalau ada (biar app yang nomori)
-        s = re.sub(r"^\s*\d+[\.\)]\s*", "", s)
-        if s:
-            result.append(s)
-    return result
+    Mengembalikan [] kalau kombinasi tidak ada / kosong.
+    """
+    if not phase or not class_level or not subject:
+        return []
+    p = str(phase).strip().upper()
+    c = str(class_level).strip().upper()
+    s = str(subject).strip()
+    return list(CP_GRAPH.get(p, {}).get(c, {}).get(s, []))
 
 
 # =========================================================

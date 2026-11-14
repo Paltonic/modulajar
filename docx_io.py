@@ -202,7 +202,10 @@ def export_docx(data, info, logo_path=None):
     for i, (label, content) in enumerate(content_rows):
         _write_cell(t3.cell(i, 0), label, bold=True)
         _shade_cell(t3.cell(i, 0), HEADER_FILL)
-        _write_cell(t3.cell(i, 1), content)
+        # Khusus baris "Learning Outcomes" (cp_text) → JUSTIFY
+        is_cp_row = ("learning outcomes" in label.lower()) or ("capaian pembelajaran" in label.lower())
+        align = WD_ALIGN_PARAGRAPH.JUSTIFY if is_cp_row else WD_ALIGN_PARAGRAPH.LEFT
+        _write_cell(t3.cell(i, 1), content, align=align)
     for row in t3.rows:
         row.cells[0].width = Cm(6)
         row.cells[1].width = Cm(19.5)
