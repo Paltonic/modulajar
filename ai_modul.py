@@ -1,444 +1,570 @@
-"""ai_modul.py — Modul Ajar prompt builder (No-API mode, English Cambridge).
+"""app.py — Streamlit UI: Modul Ajar Generator (No-API, Paste-to-Claude).
 
-Tidak ada panggilan API. Semua interaksi AI dilakukan manual via Claude.ai.
-CP (Capaian Pembelajaran) sekarang diambil dari CP_GRAPH berdasarkan
-(phase, class_level, subject) — bukan lagi di-generate via prompt.
+Flow:
+  STEP 1: Build modul prompt (CP otomatis dari CP_GRAPH)
+  STEP 2: Copy modul prompt ke Claude
+  STEP 3: Paste modul JSON -> preview -> export DOCX
 """
+import datetime
 import json
-import re
+import pandas as pd
+import streamlit as st
 
-
-# =========================================================
-# Local JSON parser
-# =========================================================
-def _parse_json(content):
-    content = (content or "").strip()
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.lower().startswith("json"):
-            content = content[4:]
-        content = content.strip()
-        if content.endswith("```"):
-            content = content[:-3].strip()
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        start = content.find("{")
-        end = content.rfind("}")
-        if start != -1 and end != -1:
-            return json.loads(content[start : end + 1])
-        raise
-
-
-# =========================================================
-# KONSTANTA
-# =========================================================
-INQUIRY_STAGES = [
-    "Tuning In", "Finding Out", "Sorting Out",
-    "Going Further", "Making Conclusions", "Taking Actions",
-]
-
-NAKAMURA_PROFILE = [
-    "Keimanan dan Ketakwaan terhadap Tuhan Yang Maha Esa",
-    "Kewargaan", "Penalaran Kritis", "Kreativitas",
-    "Kolaborasi", "Kemandirian", "Kesejahteraan", "Komunikasi",
-]
-
-BLOOM_LEVELS = [
-    "Mengingat", "Memahami", "Menerapkan",
-    "Menganalisis", "Mengevaluasi", "Mencipta",
-]
-
-NAKAMURA_LIST_STR = " | ".join(NAKAMURA_PROFILE)
-
-KIRITSU_OPENING = (
-    "1. Kiritsu (起立): Students stand up and greet the teacher in Japanese.\n"
-    "2. Rei (礼): Students bow together.\n"
-    "3. Chakuseki (着席): Students sit down, ready to learn."
+from ai_modul import (
+    build_modul_prompt,
+    _normalize, _parse_json,
+    BLOOM_LEVELS, SUBJECTS, get_cp,
 )
-KIRITSU_CLOSING = (
-    "1. Kiritsu (起立): Students stand up.\n"
-    "2. Rei (礼): Students bow and thank the teacher.\n"
-    "3. Chakuseki (着席) or dismissal: Students sit down / leave politely."
-)
+from docx_io import export_docx
+from file_io import extract_text_from_file
+
+st.set_page_config(page_title="Modul Ajar Generator", page_icon="📚", layout="wide")
 
 
 # =========================================================
-# SUBJECTS & CP GRAPH
+# Helper tanggal
 # =========================================================
-SUBJECTS = [
-    "Mathematics",
-    "Computer Science",
-    "Health and Physical Education",
+DAYS_EN = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+MONTHS_EN = ["January", "February", "March", "April", "May", "June",
+             "July", "August", "September", "October", "November", "December"]
+
+
+def format_date_en(d):
+    if isinstance(d, datetime.date):
+        return f"{DAYS_EN[d.weekday()]}, {d.day} {MONTHS_EN[d.month-1]} {d.year}"
+    return str(d) if d else ""
+
+
+# =========================================================
+# Mapping Kelas → Fase (single source of truth)
+# =========================================================
+CLASS_LEVEL_OPTIONS = [
+    "K1", "K2",          # Fase A (SD 1-2)
+    "K3", "K4",          # Fase B (SD 3-4)
+    "P5", "P6",          # Fase C (SD 5-6)
+    "J1", "J2", "J3",    # Fase D (SMP 7-9)
+    "S1",                # Fase E (SMA/SMK 10)
+    "S2", "S3",          # Fase F (SMA/SMK 11-12)
 ]
 
-# CP Graph: phase → class_level → subject → list of CP strings.
-# Empty list [] = "kosongkan" (bisa diisi manual di UI, atau isi nanti di sini).
-#
-# Konvensi class_level:
-#   Fase A (SD 1-2)     → K1, K2
-#   Fase B (SD 3-4)     → K3, K4
-#   Fase C (SD 5-6)     → K5, K6
-#   Fase D (SMP 7-9)    → J1, J2, J3
-#   Fase E (SMA/SMK 10) → S1
-#   Fase F (SMA/SMK 11-12) → S2, S3
-#
-# Contoh pengisian:
-#   "Mathematics": [
-#       "[Knowledge] Students are able to explain ...",
-#       "[Skill] Students are able to apply ...",
-#   ]
-CP_GRAPH = {
-    "A": {
-        "K1": {s: [] for s in SUBJECTS},
-        "K2": {s: [] for s in SUBJECTS},
-    },
-    "B": {
-        "K3": {s: [] for s in SUBJECTS},
-        "K4": {s: [] for s in SUBJECTS},
-    },
-    "C": {
-        "K5": {s: [] for s in SUBJECTS},
-        "K6": {s: [] for s in SUBJECTS},
-    },
-    "D": {
-        "J1": {s: [] for s in SUBJECTS},
-        "J2": {s: [] for s in SUBJECTS},
-        "J3": {s: [] for s in SUBJECTS},
-    },
-    "E": {
-        "S1": {s: [] for s in SUBJECTS},
-    },
-    "F": {
-        "S2": {s: [] for s in SUBJECTS},
-        "S3": {s: [] for s in SUBJECTS},
-    },
+PHASE_MAP = {
+    "K1": "A", "K2": "A",
+    "K3": "B", "K4": "B",
+    "P5": "C", "P6": "C",
+    "J1": "D", "J2": "D", "J3": "D",
+    "S1": "E",
+    "S2": "F", "S3": "F",
 }
 
 
-def get_cp(phase, class_level, subject):
-    """Ambil list CP dari CP_GRAPH berdasarkan (phase, class_level, subject).
-
-    Mengembalikan [] kalau kombinasi tidak ada / kosong.
-    """
-    if not phase or not class_level or not subject:
-        return []
-    p = str(phase).strip().upper()
-    c = str(class_level).strip().upper()
-    s = str(subject).strip()
-    return list(CP_GRAPH.get(p, {}).get(c, {}).get(s, []))
+# =========================================================
+# State initialization
+# =========================================================
+if "modul" not in st.session_state:
+    st.session_state["modul"] = None
+if "modul_info" not in st.session_state:
+    st.session_state["modul_info"] = {}
+if "prompt_ready" not in st.session_state:
+    st.session_state["prompt_ready"] = None
+if "cp_list" not in st.session_state:
+    st.session_state["cp_list"] = []
+if "meetings_list" not in st.session_state:
+    st.session_state["meetings_list"] = [{
+        "number": 1, "topic": "", "level": "Memahami",
+        "date_obj": datetime.date.today(),
+        "date": format_date_en(datetime.date.today()),
+    }]
 
 
 # =========================================================
-# PROMPT MODUL AJAR (Cambridge)
+# SIDEBAR
 # =========================================================
-PROMPT_TEMPLATE = """You are an experienced curriculum designer at Nakamura School.
-Your pedagogical framework is the **Cambridge International Curriculum**
-(Cambridge Lower Secondary / IGCSE standards). Use Cambridge terminology:
-learning objectives, success criteria, active learning, differentiation,
-formative assessment, and real-world application.
+st.sidebar.title("📄 1. Upload Referensi (Opsional)")
+st.sidebar.caption("Upload Silabus/ATP untuk memperkaya prompt modul.")
 
-We need a complete lesson module (Modul Ajar) for MULTIPLE MEETINGS.
+uploaded_doc = st.sidebar.file_uploader(
+    "Pilih file (PDF/DOCX/TXT)",
+    type=["pdf", "docx", "txt"],
+    label_visibility="collapsed",
+)
 
-=== REFERENCE DOCUMENT (SYLLABUS/CURRICULUM) ===
-{reference_text}
+ref_text = ""
+if uploaded_doc:
+    ref_text = extract_text_from_file(uploaded_doc)
+    if ref_text and not ref_text.startswith("Error"):
+        st.sidebar.success(f"Berhasil membaca dokumen ({len(ref_text)} karakter).")
+    else:
+        st.sidebar.error("Gagal membaca file.")
 
-=== FIXED CONTEXT ===
-Teacher           : {teacher}
-Subject           : {subject}
-Class / Phase     : {class_level} / Fase {phase}
-Duration          : {duration}
-Term / Semester   : {term}
+st.sidebar.divider()
+st.sidebar.title("🏫 2. Identitas Modul")
+teacher = st.sidebar.text_input("Nama Guru", value="Frederick Liko, S.Kom.", key="in_teacher")
 
-=== MEETINGS & TOPICS ===
-{meetings_input}
+# Subject dropdown
+subject = st.sidebar.selectbox(
+    "Mata Pelajaran",
+    SUBJECTS,
+    index=2,               # default: Health and Physical Education
+    key="in_subject_sel",
+)
 
-=== CAPAIAN PEMBELAJARAN (CP) — PROVIDED BY TEACHER ===
-{cp_block}
+jenjang = st.sidebar.selectbox(
+    "Jenjang Pendidikan (Untuk Judul)",
+    ["TK", "SD", "SMP", "SMA", "SMK"],
+    index=3, key="in_jenjang",
+)
 
-Use the CP above as the PRIMARY reference:
-- Every learning objective in each meeting MUST map to at least one CP.
-- Activities should build toward achieving those CP.
-- Do NOT invent new CP beyond this list.
+# Kelas dropdown — Fase auto-derive dari kelas
+class_level = st.sidebar.selectbox(
+    "Kelas (Untuk Kolom Tabel)",
+    CLASS_LEVEL_OPTIONS,
+    index=CLASS_LEVEL_OPTIONS.index("S2"),
+    key="in_class",
+)
+phase = PHASE_MAP.get(class_level, "F")
+st.sidebar.text_input("Fase (otomatis dari Kelas)", value=phase, disabled=True, key="in_phase_display")
 
-=== YOUR TASKS ===
-1. Align all activities with the Cambridge curriculum and the reference document (if provided).
-2. INFER Prior Knowledge, Key Vocabulary, Guiding Questions, and Learning Objectives from the topics AND the CP above.
-3. Design ACTIVE, student-centered, inquiry-based activities (no passive lecturing).
-4. Include the **Kiritsu (起立) routine** as the opening of "Tuning In" and
-   as the closing of the Assessment/Reflection section.
+duration = st.sidebar.text_input("Durasi per Meeting", value="2 x 40 menit", key="in_dur")
+term = st.sidebar.text_input("Term / Semester", value="1/1", key="in_term")
+academic_year = st.sidebar.text_input("Tahun Ajaran", value="2026/2027", key="in_year")
+unit_elemen = st.sidebar.text_input("Unit / Elemen", value="AI Development", key="in_unit")
 
-Produce output in STRICT JSON (no markdown fences).
+st.sidebar.divider()
+st.sidebar.title("✍️ 3. Tanda Tangan")
 
-=== SCHEMA ===
-{{
-  "learning_outcomes": "",
-  "prior_knowledge":     ["Students already understand...", "Students are able to..."],
-  "guiding_questions":   ["Essential question 1...", "Essential question 2..."],
-  "enduring_understanding": "...",
-  "key_vocabulary": [
-     {{"jp": "kata jepang", "romaji": "romaji", "arti": "arti"}}
-  ],
-  "resources_materials": [
-    "Textbook: Cambridge Global English Stage 7, pp. 45-50",
-    "Journal: Journal of Japanese Language Education, Vol. 3 (2024)",
-    "PPT: Nakamura School — Chapter 3 Slides"
-  ],
-  "subject_integration": {{
-    "subjects": [
-      {{
-        "subject": "Science",
-        "connection": "Students apply measurement and data-handling skills...",
-        "daily_life": "Measuring ingredients in cooking, reading temperature..."
-      }}
-    ]
-  }},
-  "character_building": {{
-     "Keimanan dan Ketakwaan terhadap Tuhan Yang Maha Esa": "...",
-     "Kewargaan": "...", "Penalaran Kritis": "...", "Kreativitas": "...",
-     "Kolaborasi": "...", "Kemandirian": "...", "Kesejahteraan": "...", "Komunikasi": "..."
-  }},
-  "meetings": [
-     {{
-       "number": 1,
-       "topic": "Topic of meeting 1",
-       "level": "Cognitive level of meeting 1",
-       "day_date": "<exact copy of the Date given for this meeting>",
-       "objectives": [
-         "By the end of the lesson, students will be able to ... (LO 1)",
-         "By the end of the lesson, students will be able to ... (LO 2)",
-         "By the end of the lesson, students will be able to ... (LO 3)"
-       ],
-       "stages": [
-         {{"stage": "Tuning In",         "activity": "{kiritsu_opening}\\n4. Teacher shows a short video...\\n5. Students ask critical questions...", "values": "<ONE dimension OR hyphen>"}},
-         {{"stage": "Finding Out",        "activity": "1. Students read ...\\n2. Students collect data ...", "values": "<ONE dimension OR hyphen>"}},
-         {{"stage": "Sorting Out",        "activity": "1. Students classify ...\\n2. Students discuss ...", "values": "<ONE dimension OR hyphen>"}},
-         {{"stage": "Going Further",      "activity": "1. Students investigate ...\\n2. Students solve ...", "values": "<ONE dimension OR hyphen>"}},
-         {{"stage": "Making Conclusions", "activity": "1. Students present ...\\n2. Students reflect ...", "values": "<ONE dimension OR hyphen>"}},
-         {{"stage": "Taking Actions",     "activity": "1. Students apply ...\\n2. Students share ...", "values": "<ONE dimension OR hyphen>"}}
-       ]
-     }}
-  ],
-  "assessment_reflection": "Formative: ...\\nSummative: ...\\nReflection: ...\\n\\nClosing routine:\\n{kiritsu_closing}"
-}}
+DEFAULT_REVIEWER = "Aldi Permana Sembiring, S.Pd., B.Ed., Gr"
 
-=== RULES ===
-- Output valid JSON only, NO ```json fences, NO preamble, NO explanation.
-- ALL narrative fields MUST be in ENGLISH (except key_vocabulary jp/romaji/arti).
-- Cambridge International Curriculum terminology must be used.
-- "learning_outcomes" MUST be an EMPTY STRING "" — the app fills it from the CP list above.
-- "resources_materials" MUST cite specific examples.
-- "subject_integration" MUST be an OBJECT with key "subjects". Provide 2-3 subjects.
-- Each meeting MUST have EXACTLY 3 learning objectives.
-- Each objective MUST map to at least one CP listed above.
-- "activity" fields MUST contain MULTIPLE numbered points (3-5), separated by "\\n".
-- The FIRST activity of "Tuning In" MUST be the Kiritsu opening routine.
-- The LAST part of "assessment_reflection" MUST include the Kiritsu closing routine.
-- "values" for each stage = EXACTLY ONE dimension from: {nakamura_list}, OR "-".
-- "day_date" MUST be an EXACT copy of the Date given.
-- The "meetings" array MUST contain EXACTLY {n_meetings} objects.
+REVIEWER_MAP = {
+    "SD": "Mei Nila Lipina Sinaga, S.Pd., B.Ed., Gr",
+}
 
-=== KIRITSU OPENING ===
-{kiritsu_opening}
+APPROVER_MAP = {
+    "TK":  "Yuniarti Kristiany, S.Pd., B.SC., Gr",
+    "SD":  "Yuniarti Kristiany, S.Pd., B.SC., Gr",
+    "SMP": "Gabriel Joshua Bastiaans, S.Pd., B.Ed., Gr",
+    "SMA": "Sri Hartati Siahaan, S.TP., M.Pd., Gr",
+    "SMK": "Sri Hartati Siahaan, S.TP., M.Pd., Gr",
+}
 
-=== KIRITSU CLOSING ===
-{kiritsu_closing}
+if st.session_state.get("_prev_jenjang") != jenjang:
+    st.session_state["_prev_jenjang"] = jenjang
+    st.session_state["in_reviewer"] = REVIEWER_MAP.get(jenjang, DEFAULT_REVIEWER)
+    st.session_state["in_approver"] = APPROVER_MAP.get(
+        jenjang, "Gabriel Joshua Bastiaans, S.Pd."
+    )
 
-=== FINAL INSTRUCTION ===
-Respond with the JSON object ONLY. Do not add any text before or after the JSON.
-"""
+reviewer = st.sidebar.text_input("Reviewed by", key="in_reviewer")
+approver = st.sidebar.text_input("Approved by", key="in_approver")
+place = st.sidebar.text_input("Kota", value="Medan")
+
+st.sidebar.divider()
+st.sidebar.info(
+    "ℹ️ **Mode No-API**\n\n"
+    "Prompt dibangun **lokal**, Anda paste ke **Claude.ai**, "
+    "lalu paste JSON balik ke app ini untuk **export DOCX**.\n\n"
+    "CP otomatis dimuat dari **CP_GRAPH** berdasarkan Kelas + Subject.\n\n"
+    "Tidak ada API key, tidak ada biaya otomatis."
+)
 
 
-def build_modul_prompt(teacher, subject, class_level, phase, duration, term,
-                       meetings, reference_text="", cp_list=None):
-    meetings_str = ""
-    for m in meetings:
-        date_str = m.get("date") or "TBD"
-        meetings_str += (
-            f"- Meeting {m['number']}: Date = {date_str} | "
-            f"Topic = {m['topic']} | Level = {m['level']}\n"
+# =========================================================
+# HALAMAN UTAMA — Dynamic Meetings
+# =========================================================
+st.title("📚 Modul Ajar Generator")
+st.markdown(
+    "**Flow:** STEP 1 (build prompt modul) → STEP 2 (copy ke Claude) → "
+    "STEP 3 (paste JSON balik) → Export DOCX. "
+    "CP otomatis dimuat dari **CP_GRAPH**."
+)
+
+for i, m in enumerate(st.session_state["meetings_list"]):
+    with st.container(border=True):
+        c1, c2, c3, c4 = st.columns([3, 1.5, 2, 0.5])
+        m["topic"] = c1.text_input(
+            f"Topik Meeting {m['number']}",
+            value=m["topic"], key=f"topic_{i}",
+        )
+        m["level"] = c2.selectbox(
+            f"Level Kognitif {m['number']}",
+            BLOOM_LEVELS,
+            index=BLOOM_LEVELS.index(m["level"]),
+            key=f"level_{i}",
+        )
+        default_date = m.get("date_obj") or datetime.date.today()
+        date_val = c3.date_input(f"Tanggal M{m['number']}", value=default_date, key=f"date_{i}")
+        m["date_obj"] = date_val
+        m["date"] = format_date_en(date_val)
+
+        if len(st.session_state["meetings_list"]) > 1:
+            if c4.button("🗑️", key=f"del_{i}", help="Hapus meeting ini"):
+                st.session_state["meetings_list"].pop(i)
+                for j, x in enumerate(st.session_state["meetings_list"]):
+                    x["number"] = j + 1
+                st.rerun()
+
+st.write("")
+if st.button("➕ Tambah Meeting", use_container_width=True):
+    st.session_state["meetings_list"].append({
+        "number": len(st.session_state["meetings_list"]) + 1,
+        "topic": "", "level": "Memahami",
+        "date_obj": datetime.date.today(),
+        "date": format_date_en(datetime.date.today()),
+    })
+    st.rerun()
+
+st.divider()
+
+
+# =========================================================
+# AUTO-LOAD CP (silent) dari CP_GRAPH
+# =========================================================
+cp_key = (
+    str(phase).strip().upper(),
+    str(class_level).strip().upper(),
+    str(subject).strip(),
+)
+if st.session_state.get("_cp_key") != cp_key:
+    st.session_state["_cp_key"] = cp_key
+    st.session_state["cp_list"] = get_cp(phase, class_level, subject)
+    st.session_state.pop("cp_edit_box", None)
+
+# Expander ringkas untuk review / edit CP (opsional)
+cp_current = st.session_state.get("cp_list", [])
+with st.expander(
+    f"🎯 Capaian Pembelajaran — {len(cp_current)} item "
+    f"(Fase {phase} · {class_level} · {subject}) — klik untuk lihat/edit",
+    expanded=False,
+):
+    if cp_current:
+        st.caption(
+            f"CP dimuat otomatis dari `CP_GRAPH` untuk "
+            f"Fase **{phase}** / Kelas **{class_level}** / **{subject}**. "
+            "Bisa diedit di bawah (satu CP per baris)."
+        )
+    else:
+        st.caption(
+            f"CP untuk Fase **{phase}** / Kelas **{class_level}** / **{subject}** "
+            "masih kosong. Silakan isi manual di bawah, "
+            "atau tambahkan di `CP_GRAPH` pada `ai_modul.py`."
         )
 
-    cp_list = cp_list or []
-    if cp_list:
-        cp_block = "\n".join(f"{i+1}. {cp}" for i, cp in enumerate(cp_list))
-    else:
-        cp_block = "(No CP provided — infer from topics)"
+    cp_text_current = "\n".join(cp_current)
+    edited_cp = st.text_area(
+        "Satu CP per baris. Kosongkan baris yang tidak dipakai.",
+        value=cp_text_current, height=200, key="cp_edit_box",
+        label_visibility="collapsed",
+    )
+    new_cp_list = [line.strip() for line in edited_cp.split("\n") if line.strip()]
+    if new_cp_list != cp_current:
+        st.session_state["cp_list"] = new_cp_list
 
-    ref = reference_text[:6000] if reference_text else "(No document provided)"
-    return PROMPT_TEMPLATE.format(
-        teacher=teacher, subject=subject, class_level=class_level,
-        phase=phase, duration=duration, term=term,
-        meetings_input=meetings_str, reference_text=ref,
-        cp_block=cp_block,
-        n_meetings=len(meetings), nakamura_list=NAKAMURA_LIST_STR,
-        kiritsu_opening=KIRITSU_OPENING, kiritsu_closing=KIRITSU_CLOSING,
+    st.caption(f"ℹ️ {len(new_cp_list)} CP aktif.")
+
+
+# =========================================================
+# STEP 1 — Build modul prompt
+# =========================================================
+st.header("📝 STEP 1 — Build Prompt Modul Ajar")
+
+if st.button("🚀 Build Prompt Modul", type="primary", use_container_width=True):
+    empty_topics = [m["number"] for m in st.session_state["meetings_list"] if not m["topic"].strip()]
+    if empty_topics:
+        st.error(f"Topik Meeting {', '.join(map(str, empty_topics))} masih kosong!")
+    else:
+        if not st.session_state.get("cp_list"):
+            st.warning("⚠️ Belum ada CP. Modul tetap bisa di-generate, tapi lebih baik isi CP dulu.")
+        try:
+            prompt = build_modul_prompt(
+                teacher=teacher, subject=subject, class_level=class_level,
+                phase=phase, duration=duration, term=term,
+                meetings=st.session_state["meetings_list"],
+                reference_text=ref_text,
+                cp_list=st.session_state.get("cp_list", []),
+            )
+            st.session_state["prompt_ready"] = prompt
+            st.session_state["modul_info"] = {
+                "teacher": teacher, "subject": subject,
+                "class_level": class_level, "jenjang": jenjang,
+                "phase": phase, "duration": duration, "term": term,
+                "reviewer": reviewer, "approver": approver,
+                "place": place, "date": format_date_en(datetime.date.today()),
+                "academic_year": academic_year,
+                "topic": f"{len(st.session_state['meetings_list'])} Meetings",
+                "unit_elemen": unit_elemen,
+            }
+            st.success("✅ Modul prompt siap. Lanjut ke STEP 2.")
+        except Exception as e:
+            st.error(f"Gagal build prompt: {e}")
+
+
+# =========================================================
+# STEP 2 — Display modul prompt
+# =========================================================
+if st.session_state.get("prompt_ready"):
+    st.divider()
+    st.header("📋 STEP 2 — Copy Modul Prompt ke Claude.ai")
+    st.info(
+        "1. Klik **Copy** di pojok kanan atas kotak hitam\n"
+        "2. Paste ke [claude.ai](https://claude.ai)\n"
+        "3. Tunggu selesai (30–120 detik, tergantung jumlah meeting)\n"
+        "4. **Ctrl+A → Ctrl+C** untuk copy seluruh jawaban Claude\n"
+        "5. Lanjut ke STEP 3"
+    )
+    st.code(st.session_state["prompt_ready"], language="text")
+    st.download_button(
+        "⬇️ Download Modul Prompt (.txt)",
+        data=st.session_state["prompt_ready"],
+        file_name="prompt_modul.txt",
+        mime="text/plain",
+        use_container_width=True,
     )
 
 
 # =========================================================
-# NORMALIZER — dipakai app.py untuk parse JSON modul
+# STEP 3 — Paste modul JSON
 # =========================================================
-def _as_list(v):
-    if v is None:
-        return []
-    if isinstance(v, (list, tuple)):
-        return [str(x).strip() for x in v if str(x).strip()]
-    s = str(v).strip()
-    return [s] if s else []
+if st.session_state.get("prompt_ready"):
+    st.divider()
+    st.header("📥 STEP 3 — Paste Jawaban Modul (JSON)")
 
+    pasted = st.text_area(
+        "Paste seluruh respons Claude di sini (boleh termasuk ```json ... ```):",
+        height=320, key="pasted_json",
+        placeholder='{"learning_outcomes": "", "prior_knowledge": [...], ...}',
+    )
 
-def _as_text(v, default="-"):
-    if v is None:
-        return default
-    if isinstance(v, str):
-        s = v.strip()
-        return s if s else default
-    if isinstance(v, (list, tuple)):
-        lines = []
-        for item in v:
-            if isinstance(item, (dict, list, tuple)):
-                sub = _as_text(item, default="")
-                if sub:
-                    lines.append(f"- {sub}")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        if st.button("🔍 Parse & Preview Modul", type="primary", use_container_width=True):
+            if not pasted or not pasted.strip():
+                st.error("Kotak paste masih kosong.")
             else:
-                s = str(item).strip()
-                if s:
-                    lines.append(f"- {s}")
-        return "\n".join(lines) if lines else default
-    if isinstance(v, dict):
-        lines = [f"- {k}: {_as_text(val)}" for k, val in v.items()]
-        return "\n".join(lines) if lines else default
-    s = str(v).strip()
-    return s if s else default
+                try:
+                    parsed = _parse_json(pasted)
+                    normalized = _normalize(parsed, st.session_state["meetings_list"])
+
+                    # Inject CP dari CP_GRAPH ke learning_outcomes
+                    cp_list = st.session_state.get("cp_list", [])
+                    if cp_list:
+                        normalized["learning_outcomes"] = "\n".join(
+                            f"{i+1}. {cp}" for i, cp in enumerate(cp_list)
+                        )
+
+                    st.session_state["modul"] = normalized
+                    st.success(f"✅ Berhasil parse — {len(normalized['meetings'])} meeting, {len(cp_list)} CP.")
+                    st.rerun()
+                except json.JSONDecodeError as e:
+                    st.error(
+                        f"❌ JSON tidak valid: {e}\n\n"
+                        "Kemungkinan: jawaban terpotong / copy tidak lengkap / "
+                        "ada teks di luar JSON."
+                    )
+                except Exception as e:
+                    st.error(f"❌ Gagal parse: {e}")
+    with c2:
+        if st.button("🧹 Reset Prompt", use_container_width=True):
+            st.session_state.pop("prompt_ready", None)
+            st.session_state.pop("pasted_json", None)
+            st.rerun()
 
 
-def _coerce_value(v):
-    if v is None:
-        return "-"
-    if isinstance(v, (list, tuple)):
-        v = " ".join(str(x) for x in v)
-    elif isinstance(v, dict):
-        v = " ".join(str(x) for x in v.values())
-    v = str(v).strip()
-    if not v:
-        return "-"
-    if v in NAKAMURA_PROFILE:
-        return v
-    low = v.lower()
-    for dim in NAKAMURA_PROFILE:
-        if dim.lower() in low or low in dim.lower():
-            return dim
-    keywords = {
-        "kolaborasi": "Kolaborasi", "kelompok": "Kolaborasi", "diskusi": "Kolaborasi",
-        "kritis": "Penalaran Kritis", "analis": "Penalaran Kritis",
-        "kreatif": "Kreativitas", "karya": "Kreativitas",
-        "mandiri": "Kemandirian", "sendiri": "Kemandirian",
-        "komunikasi": "Komunikasi", "presentasi": "Komunikasi",
-        "kewargaan": "Kewargaan", "sopan": "Kewargaan",
-        "sejahtera": "Kesejahteraan", "refleksi": "Kesejahteraan",
-        "tuhan": "Keimanan dan Ketakwaan terhadap Tuhan Yang Maha Esa",
-        "iman": "Keimanan dan Ketakwaan terhadap Tuhan Yang Maha Esa",
-    }
-    for kw, dim in keywords.items():
-        if kw in low:
-            return dim
-    return "-"
+# =========================================================
+# RENDER HASIL MODUL
+# =========================================================
+data = st.session_state["modul"]
+info = st.session_state["modul_info"]
 
+if data:
+    st.divider()
+    st.subheader(f"✏️ Preview Modul ({info.get('topic', '')})")
 
-def _normalize_subject_integration(si):
-    if isinstance(si, dict):
-        subjects_raw = si.get("subjects") or []
-    elif isinstance(si, str) and si.strip():
-        subjects_raw = [{"subject": "General", "connection": si.strip(), "daily_life": "-"}]
-    else:
-        subjects_raw = []
-    subjects = []
-    for s in subjects_raw:
-        if isinstance(s, dict):
-            subjects.append({
-                "subject": _as_text(s.get("subject"), "-"),
-                "connection": _as_text(s.get("connection"), "-"),
-                "daily_life": _as_text(s.get("daily_life"), "-"),
-            })
-        elif isinstance(s, str) and s.strip():
-            subjects.append({"subject": s.strip(), "connection": "-", "daily_life": "-"})
-    return {"subjects": subjects}
+    def collect():
+        def get(key, default):
+            return st.session_state.get(key, default)
 
+        kv_edited = get("e_kv", None)
+        kv = kv_edited.to_dict("records") if isinstance(kv_edited, pd.DataFrame) else data["key_vocabulary"]
 
-def _normalize(data, meetings_input):
-    d = data if isinstance(data, dict) else {}
+        cb_edited = get("e_cb", None)
+        cb = (
+            {row["Dimensi"]: row["Deskripsi"] for _, row in cb_edited.iterrows()}
+            if isinstance(cb_edited, pd.DataFrame)
+            else data["character_building"]
+        )
 
-    cb = d.get("character_building") or {}
-    if not isinstance(cb, dict):
-        cb = {}
-    cb = {dim: _as_text(cb.get(dim), "-") for dim in NAKAMURA_PROFILE}
-
-    meetings_raw = d.get("meetings") or []
-    if not isinstance(meetings_raw, list):
-        meetings_raw = []
-
-    normalized_meetings = []
-    for i, m_in in enumerate(meetings_input):
-        src = meetings_raw[i] if i < len(meetings_raw) and isinstance(meetings_raw[i], dict) else {}
-        stages_raw = src.get("stages") or []
-        if not isinstance(stages_raw, list):
-            stages_raw = []
-        by_name = {s.get("stage"): s for s in stages_raw
-                   if isinstance(s, dict) and s.get("stage")}
-
-        stages = []
-        for sname in INQUIRY_STAGES:
-            s = by_name.get(sname, {})
-            act_text = _as_text(s.get("activity"), "-")
-            act_text = re.sub(r'(?<!\n)\s*(\d+)[\.\)]\s+', r'\n\1. ', act_text).strip()
-            stages.append({
-                "stage": sname,
-                "activity": act_text,
-                "values": _coerce_value(s.get("values")),
-            })
-
-        objs = _as_list(src.get("objectives"))
-        while len(objs) < 3:
-            objs.append("-")
-
-        normalized_meetings.append({
-            "number": int(src.get("number") or (i + 1)),
-            "topic": _as_text(src.get("topic"), m_in["topic"]),
-            "level": _as_text(src.get("level"), m_in["level"]),
-            "day_date": _as_text(src.get("day_date"), m_in.get("date") or "TBD"),
-            "objectives": objs,
-            "stages": stages,
-        })
-
-    kv_raw = d.get("key_vocabulary") or []
-    if isinstance(kv_raw, str):
-        kv_raw = [kv_raw]
-    if not isinstance(kv_raw, list):
-        kv_raw = []
-    kv = []
-    for item in kv_raw:
-        if isinstance(item, dict):
-            kv.append({
-                "jp": _as_text(item.get("jp"), ""),
-                "romaji": _as_text(item.get("romaji"), ""),
-                "arti": _as_text(item.get("arti"), ""),
-            })
+        si_edited = get("e_si", None)
+        if isinstance(si_edited, pd.DataFrame):
+            si_subjects = si_edited.to_dict("records")
         else:
-            kv.append({"jp": _as_text(item, ""), "romaji": "", "arti": ""})
+            si_subjects = (data.get("subject_integration") or {}).get("subjects", [])
 
-    ar_text = _as_text(d.get("assessment_reflection"), "-")
-    ar_text = re.sub(r'(?<!\n)\s*(\d+)[\.\)]\s+', r'\n\1. ', ar_text).strip()
+        meetings = []
+        for i, m in enumerate(data["meetings"]):
+            edited = get(f"e_meet_{i}", None)
+            stages = edited.to_dict("records") if isinstance(edited, pd.DataFrame) else m["stages"]
 
-    return {
-        "learning_outcomes": "",
-        "prior_knowledge": _as_list(d.get("prior_knowledge")) or ["-"],
-        "guiding_questions": _as_list(d.get("guiding_questions")) or ["-"],
-        "enduring_understanding": _as_text(d.get("enduring_understanding"), "-"),
-        "key_vocabulary": kv,
-        "resources_materials": _as_list(d.get("resources_materials")) or ["-"],
-        "subject_integration": _normalize_subject_integration(d.get("subject_integration")),
-        "character_building": cb,
-        "meetings": normalized_meetings,
-        "assessment_reflection": ar_text,
-    }
+            obj_list = st.session_state.get(f"list_obj_{i}", m.get("objectives", []))
+            objs = [str(o).strip() for o in obj_list if str(o).strip() and o != "-"]
+            if not objs:
+                objs = ["-"]
+
+            meetings.append({**m, "stages": stages, "objectives": objs})
+
+        lo_edited = get("e_lo", data["learning_outcomes"])
+
+        return {
+            "learning_outcomes": lo_edited,
+            "prior_knowledge": [get(f"e_pk_{i}", x) for i, x in enumerate(data["prior_knowledge"])],
+            "guiding_questions": [get(f"e_gq_{i}", x) for i, x in enumerate(data["guiding_questions"])],
+            "enduring_understanding": get("e_eu", data["enduring_understanding"]),
+            "key_vocabulary": kv,
+            "resources_materials": [get(f"e_rm_{i}", x) for i, x in enumerate(data["resources_materials"])],
+            "subject_integration": {"subjects": si_subjects},
+            "character_building": cb,
+            "meetings": meetings,
+            "assessment_reflection": get("e_ar", data["assessment_reflection"]),
+        }
+
+    tab1, tab2, tab3 = st.tabs(["📋 Tujuan & Konteks", "📖 Vocab & Karakter", "🔄 Inquiring Cycle"])
+
+    with tab1:
+        st.text_area(
+            "Capaian Pembelajaran (dari CP_GRAPH, bisa diedit)",
+            value=data["learning_outcomes"], height=180, key="e_lo",
+        )
+        st.markdown("**Prior Knowledge**")
+        for i, x in enumerate(data["prior_knowledge"]):
+            st.text_input(f"PK {i+1}", value=x, key=f"e_pk_{i}")
+        st.markdown("**Guiding Questions**")
+        for i, x in enumerate(data["guiding_questions"]):
+            st.text_input(f"GQ {i+1}", value=x, key=f"e_gq_{i}")
+        st.text_area("Enduring Understanding", value=data["enduring_understanding"], key="e_eu")
+
+    with tab2:
+        st.markdown("**Key Vocabulary**")
+        kv_df = pd.DataFrame(data["key_vocabulary"] or [{"jp": "", "romaji": "", "arti": ""}])
+        st.data_editor(kv_df, num_rows="dynamic", use_container_width=True, key="e_kv", hide_index=True)
+
+        st.markdown("**Resources**")
+        for i, x in enumerate(data["resources_materials"]):
+            st.text_input(f"Resource {i+1}", value=x, key=f"e_rm_{i}")
+
+        st.markdown("**Subject Integration & Daily Life Implementation**")
+        si_subjects = (data.get("subject_integration") or {}).get("subjects", [])
+        si_df = pd.DataFrame(si_subjects) if si_subjects else pd.DataFrame(
+            [{"subject": "", "connection": "", "daily_life": ""}]
+        )
+        st.data_editor(
+            si_df, num_rows="dynamic", use_container_width=True, key="e_si",
+            hide_index=True,
+            column_config={
+                "subject":    st.column_config.TextColumn("Integrated Subject", width="medium"),
+                "connection": st.column_config.TextColumn("Connection to Topic", width="large"),
+                "daily_life": st.column_config.TextColumn("Daily Life Implementation", width="large"),
+            },
+        )
+
+        st.markdown("**Character Building**")
+        cb_df = pd.DataFrame([{"Dimensi": k, "Deskripsi": v} for k, v in data["character_building"].items()])
+        st.data_editor(cb_df, use_container_width=True, key="e_cb", hide_index=True, disabled=["Dimensi"])
+
+    with tab3:
+        for i, m in enumerate(data["meetings"]):
+            st.markdown(f"### Meeting {m['number']}: {m.get('topic', '')} (`{m['day_date']}`)")
+
+            state_key = f"list_obj_{i}"
+            if state_key not in st.session_state:
+                initial_objs = list(m.get("objectives", []))
+                while len(initial_objs) < 3:
+                    initial_objs.append("")
+                st.session_state[state_key] = initial_objs
+
+            st.markdown("**Tujuan Pembelajaran:**")
+
+            to_delete = None
+            for j, obj in enumerate(st.session_state[state_key]):
+                c1, c2 = st.columns([11, 1])
+                new_obj = c1.text_area(
+                    f"Tujuan M{m['number']}.{j+1}",
+                    value=obj,
+                    key=f"e_obj_{i}_{j}_{len(st.session_state[state_key])}",
+                    label_visibility="collapsed",
+                    height=68,
+                )
+                st.session_state[state_key][j] = new_obj
+
+                if c2.button("🗑️", key=f"del_obj_{i}_{j}", help="Hapus tujuan ini"):
+                    to_delete = j
+
+            if to_delete is not None:
+                st.session_state[state_key].pop(to_delete)
+                st.rerun()
+
+            if st.button("➕ Tambah Tujuan", key=f"add_obj_{i}"):
+                st.session_state[state_key].append("")
+                st.rerun()
+
+            st.write("")
+
+            stages_df = pd.DataFrame(m["stages"])
+            st.data_editor(
+                stages_df, use_container_width=True, hide_index=True,
+                key=f"e_meet_{i}", disabled=["stage"],
+                column_config={
+                    "stage": st.column_config.TextColumn("Tahap", width="medium"),
+                    "activity": st.column_config.TextColumn("Aktivitas", width="large"),
+                    "values": st.column_config.TextColumn("Nilai", width="medium"),
+                },
+            )
+
+        st.text_area("Asesmen & Refleksi", value=data["assessment_reflection"], key="e_ar")
+
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("📄 Siapkan DOCX", type="primary", use_container_width=True):
+            final = collect()
+            st.session_state["docx_bytes"] = export_docx(final, info)
+            st.success("File siap diunduh ⬇️")
+        if "docx_bytes" in st.session_state:
+            st.download_button(
+                "⬇️ Download DOCX",
+                data=st.session_state["docx_bytes"],
+                file_name=f"Modul_{info['topic'][:20]}.docx",
+                use_container_width=True,
+            )
+    with c2:
+        if st.button("🧹 Reset Halaman", use_container_width=True):
+            st.session_state["modul"] = None
+            st.session_state.pop("docx_bytes", None)
+            for k in list(st.session_state.keys()):
+                if (k.startswith("list_obj_") or k.startswith("e_obj_")
+                        or k.startswith("del_obj_") or k.startswith("add_obj_")):
+                    del st.session_state[k]
+            st.rerun()
+
+
+# =========================================================
+# FOOTER
+# =========================================================
+st.divider()
+current_year = datetime.date.today().year
+st.markdown(
+    f"""
+    <div style="
+        text-align: center;
+        padding: 18px 0 10px 0;
+        margin-top: 20px;
+        border-top: 1px solid rgba(128,128,128,0.2);
+        color: #8a8a8a;
+        font-size: 13px;
+        line-height: 1.6;
+    ">
+        © {current_year} <strong> Frederick Sensei </strong> — All Rights Reserved.<br>
+        <span style="font-size: 12px;">
+            Modul Ajar Generator (No-API Mode · CP dari CP_GRAPH)
+        </span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

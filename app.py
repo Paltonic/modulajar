@@ -36,6 +36,28 @@ def format_date_en(d):
 
 
 # =========================================================
+# Mapping Kelas → Fase (single source of truth)
+# =========================================================
+CLASS_LEVEL_OPTIONS = [
+    "K1", "K2",          # Fase A (SD 1-2)
+    "K3", "K4",          # Fase B (SD 3-4)
+    "P5", "P6",          # Fase C (SD 5-6)
+    "J1", "J2", "J3",    # Fase D (SMP 7-9)
+    "S1",                # Fase E (SMA/SMK 10)
+    "S2", "S3",          # Fase F (SMA/SMK 11-12)
+]
+
+PHASE_MAP = {
+    "K1": "A", "K2": "A",
+    "K3": "B", "K4": "B",
+    "P5": "C", "P6": "C",
+    "J1": "D", "J2": "D", "J3": "D",
+    "S1": "E",
+    "S2": "F", "S3": "F",
+}
+
+
+# =========================================================
 # State initialization
 # =========================================================
 if "modul" not in st.session_state:
@@ -78,7 +100,7 @@ st.sidebar.divider()
 st.sidebar.title("🏫 2. Identitas Modul")
 teacher = st.sidebar.text_input("Nama Guru", value="Frederick Liko, S.Kom.", key="in_teacher")
 
-# Subject dropdown (Mathematics / Computer Science / Health and Physical Education)
+# Subject dropdown
 subject = st.sidebar.selectbox(
     "Mata Pelajaran",
     SUBJECTS,
@@ -92,8 +114,16 @@ jenjang = st.sidebar.selectbox(
     index=3, key="in_jenjang",
 )
 
-class_level = st.sidebar.text_input("Kelas (Untuk Kolom Tabel)", value="S2", key="in_class")
-phase = st.sidebar.text_input("Fase", value="F", key="in_phase")
+# Kelas dropdown — Fase auto-derive dari kelas
+class_level = st.sidebar.selectbox(
+    "Kelas (Untuk Kolom Tabel)",
+    CLASS_LEVEL_OPTIONS,
+    index=CLASS_LEVEL_OPTIONS.index("S2"),
+    key="in_class",
+)
+phase = PHASE_MAP.get(class_level, "F")
+st.sidebar.text_input("Fase (otomatis dari Kelas)", value=phase, disabled=True, key="in_phase_display")
+
 duration = st.sidebar.text_input("Durasi per Meeting", value="2 x 40 menit", key="in_dur")
 term = st.sidebar.text_input("Term / Semester", value="1/1", key="in_term")
 academic_year = st.sidebar.text_input("Tahun Ajaran", value="2026/2027", key="in_year")
@@ -132,7 +162,7 @@ st.sidebar.info(
     "ℹ️ **Mode No-API**\n\n"
     "Prompt dibangun **lokal**, Anda paste ke **Claude.ai**, "
     "lalu paste JSON balik ke app ini untuk **export DOCX**.\n\n"
-    "CP otomatis dimuat dari **CP_GRAPH** (Fase / Kelas / Subject).\n\n"
+    "CP otomatis dimuat dari **CP_GRAPH** berdasarkan Kelas + Subject.\n\n"
     "Tidak ada API key, tidak ada biaya otomatis."
 )
 
@@ -228,10 +258,7 @@ with st.expander(
     if new_cp_list != cp_current:
         st.session_state["cp_list"] = new_cp_list
 
-    if len(new_cp_list) < 5:
-        st.caption(f"⚠️ {len(new_cp_list)} CP — rekomendasi minimal 5.")
-    else:
-        st.caption(f"✅ {len(new_cp_list)} CP — OK (minimal 5 terpenuhi).")
+    st.caption(f"ℹ️ {len(new_cp_list)} CP aktif.")
 
 
 # =========================================================
