@@ -189,7 +189,7 @@ def export_docx(data, info, logo_path=None):
     cp_text = data.get("learning_outcomes") or "(Kosong — silakan copy Capaian Pembelajaran dari website pemerintah)"
 
     content_rows = [
-        ("Capaian Pembelajaran", cp_text),
+        ("Learning Outcomes", cp_text),
         (pk_header, _bullets_from_list(data.get("prior_knowledge"))),
         ("Guiding/Essential Questions", _numbered_from_list(data.get("guiding_questions"))),
         ("Enduring Understanding", data.get("enduring_understanding", "-") or "-"),
