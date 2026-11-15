@@ -4,9 +4,12 @@ Flow:
   STEP 1: Build modul prompt (CP otomatis dari CP_GRAPH)
   STEP 2: Copy modul prompt ke Claude
   STEP 3: Paste modul JSON -> preview -> export DOCX
+
+Output modul: Cambridge English (British English).
 """
 import datetime
 import json
+import re
 import pandas as pd
 import streamlit as st
 
@@ -100,11 +103,10 @@ st.sidebar.divider()
 st.sidebar.title("🏫 2. Identitas Modul")
 teacher = st.sidebar.text_input("Nama Guru", value="Frederick Liko, S.Kom.", key="in_teacher")
 
-# Subject dropdown
 subject = st.sidebar.selectbox(
     "Mata Pelajaran",
     SUBJECTS,
-    index=2,               # default: Health and Physical Education
+    index=0,
     key="in_subject_sel",
 )
 
@@ -114,7 +116,6 @@ jenjang = st.sidebar.selectbox(
     index=3, key="in_jenjang",
 )
 
-# Kelas dropdown — Fase auto-derive dari kelas
 class_level = st.sidebar.selectbox(
     "Kelas (Untuk Kolom Tabel)",
     CLASS_LEVEL_OPTIONS,
@@ -163,6 +164,7 @@ st.sidebar.info(
     "Prompt dibangun **lokal**, Anda paste ke **Claude.ai**, "
     "lalu paste JSON balik ke app ini untuk **export DOCX**.\n\n"
     "CP otomatis dimuat dari **CP_GRAPH** berdasarkan Kelas + Subject.\n\n"
+    "🇬🇧 **Output modul dalam Cambridge English (British English).**\n\n"
     "Tidak ada API key, tidak ada biaya otomatis."
 )
 
@@ -174,7 +176,8 @@ st.title("📚 Modul Ajar Generator")
 st.markdown(
     "**Flow:** STEP 1 (build prompt modul) → STEP 2 (copy ke Claude) → "
     "STEP 3 (paste JSON balik) → Export DOCX. "
-    "CP otomatis dimuat dari **CP_GRAPH**."
+    "CP otomatis dimuat dari **CP_GRAPH**. "
+    "**Output modul dalam Cambridge English.**"
 )
 
 for i, m in enumerate(st.session_state["meetings_list"]):
@@ -226,9 +229,9 @@ cp_key = (
 if st.session_state.get("_cp_key") != cp_key:
     st.session_state["_cp_key"] = cp_key
     st.session_state["cp_list"] = get_cp(phase, class_level, subject)
-    st.session_state.pop("cp_edit_box", None)
+    # Force reset e_lo (Preview LO) agar sinkron saat kelas diganti
+    st.session_state.pop("e_lo", None)
 
-# Expander ringkas untuk review / edit CP (opsional)
 cp_current = st.session_state.get("cp_list", [])
 with st.expander(
     f"🎯 Capaian Pembelajaran — {len(cp_current)} item "
@@ -249,14 +252,22 @@ with st.expander(
         )
 
     cp_text_current = "\n".join(cp_current)
+    
+    # DYNAMIC KEY: Memaksa text area refresh saat kelas/mapel berubah
+    dynamic_cp_key = f"cp_edit_box_{phase}_{class_level}_{subject.replace(' ', '_')}"
+    
     edited_cp = st.text_area(
         "Satu CP per baris. Kosongkan baris yang tidak dipakai.",
-        value=cp_text_current, height=200, key="cp_edit_box",
+        value=cp_text_current, height=200, key=dynamic_cp_key,
         label_visibility="collapsed",
     )
     new_cp_list = [line.strip() for line in edited_cp.split("\n") if line.strip()]
+    
     if new_cp_list != cp_current:
         st.session_state["cp_list"] = new_cp_list
+        # Sinkronkan langsung ke Preview LO di bawah jika ada perubahan
+        if "e_lo" in st.session_state:
+            st.session_state["e_lo"] = "\n".join(f"{i+1}. {cp}" for i, cp in enumerate(new_cp_list))
 
     st.caption(f"ℹ️ {len(new_cp_list)} CP aktif.")
 
@@ -274,12 +285,21 @@ if st.button("🚀 Build Prompt Modul", type="primary", use_container_width=True
         if not st.session_state.get("cp_list"):
             st.warning("⚠️ Belum ada CP. Modul tetap bisa di-generate, tapi lebih baik isi CP dulu.")
         try:
+            # Prioritas: Ambil dari kotak Preview (e_lo) jika user sudah mengeditnya
+            if "e_lo" in st.session_state and st.session_state["e_lo"].strip():
+                lo_lines = st.session_state["e_lo"].split("\n")
+                # Bersihkan penomoran manual agar tidak dobel "1. 1. ..."
+                clean_cp = [re.sub(r'^\d+\.\s*', '', line.strip()) for line in lo_lines if line.strip()]
+                cp_to_use = clean_cp
+            else:
+                cp_to_use = st.session_state.get("cp_list", [])
+
             prompt = build_modul_prompt(
                 teacher=teacher, subject=subject, class_level=class_level,
                 phase=phase, duration=duration, term=term,
                 meetings=st.session_state["meetings_list"],
                 reference_text=ref_text,
-                cp_list=st.session_state.get("cp_list", []),
+                cp_list=cp_to_use, # Menggunakan CP yang sudah disinkronkan
             )
             st.session_state["prompt_ready"] = prompt
             st.session_state["modul_info"] = {
@@ -308,7 +328,8 @@ if st.session_state.get("prompt_ready"):
         "2. Paste ke [claude.ai](https://claude.ai)\n"
         "3. Tunggu selesai (30–120 detik, tergantung jumlah meeting)\n"
         "4. **Ctrl+A → Ctrl+C** untuk copy seluruh jawaban Claude\n"
-        "5. Lanjut ke STEP 3"
+        "5. Lanjut ke STEP 3\n\n"
+        "🇬🇧 **Output modul akan dihasilkan dalam Cambridge English (British English).**"
     )
     st.code(st.session_state["prompt_ready"], language="text")
     st.download_button(
@@ -343,7 +364,6 @@ if st.session_state.get("prompt_ready"):
                     parsed = _parse_json(pasted)
                     normalized = _normalize(parsed, st.session_state["meetings_list"])
 
-                    # Inject CP dari CP_GRAPH ke learning_outcomes
                     cp_list = st.session_state.get("cp_list", [])
                     if cp_list:
                         normalized["learning_outcomes"] = "\n".join(
@@ -351,6 +371,8 @@ if st.session_state.get("prompt_ready"):
                         )
 
                     st.session_state["modul"] = normalized
+                    # Hapus e_lo agar Preview mengambil data murni dari JSON baru
+                    st.session_state.pop("e_lo", None) 
                     st.success(f"✅ Berhasil parse — {len(normalized['meetings'])} meeting, {len(cp_list)} CP.")
                     st.rerun()
                 except json.JSONDecodeError as e:
@@ -562,7 +584,7 @@ st.markdown(
     ">
         © {current_year} <strong> Frederick Sensei </strong> — All Rights Reserved.<br>
         <span style="font-size: 12px;">
-            Modul Ajar Generator (No-API Mode · CP dari CP_GRAPH)
+            Modul Ajar Generator (No-API Mode · Cambridge English · CP dari CP_GRAPH)
         </span>
     </div>
     """,

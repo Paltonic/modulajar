@@ -1,4 +1,4 @@
-"""docx_io.py — Export Modul Ajar."""
+"""docx_io.py — Export Modul Ajar (Cambridge English)."""
 import os
 import re
 from io import BytesIO
@@ -36,10 +36,10 @@ def _shade_cell(cell, color_hex):
 def _write_cell(cell, text, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, size=12):
     cell.text = ""
     text = str(text) if text is not None else ""
-    
+
     # Memisahkan penomoran 1. 2. 3. yang menyatu menjadi enter di Word
     text = re.sub(r'(?<!\n)\s*(\d+)[\.\)]\s+', r'\n\1. ', text).strip()
-    
+
     lines = text.split("\n")
     for i, line in enumerate(lines):
         p = cell.paragraphs[0] if i == 0 else cell.add_paragraph()
@@ -102,15 +102,22 @@ def export_docx(data, info, logo_path=None):
 
     # ---------- Header: Logo + Judul (sejajar) ----------
     year = info.get("academic_year", "2026/2027")
-    jenjang = info.get("jenjang", "SMA") # Menggunakan input Jenjang untuk judul
+    jenjang = info.get("jenjang", "SMA")
     title_text = f"Modul Ajar Academic Year {year} {jenjang} Swasta Nakamura School"
 
     logo_file = logo_path or LOGO_PATH
     header_tbl = doc.add_table(rows=1, cols=2)
     header_tbl.autofit = False
+    header_tbl.allow_autofit = False
     _remove_table_borders(header_tbl)
 
-    # Kiri: logo (kalau ada file-nya)
+    # Kunci layout tabel header
+    tblPr_h = header_tbl._tbl.tblPr
+    layout_h = OxmlElement('w:tblLayout')
+    layout_h.set(qn('w:type'), 'fixed')
+    tblPr_h.append(layout_h)
+
+    # Kiri: logo (Lebar: 4.5 cm)
     logo_cell = header_tbl.cell(0, 0)
     logo_cell.width = Cm(4.5)
     if os.path.exists(logo_file):
@@ -124,7 +131,7 @@ def export_docx(data, info, logo_path=None):
     else:
         logo_cell.text = "[LOGO NAKAMURA]"
 
-    # Kanan: judul (Arial 24)
+    # Kanan: judul (Lebar: 20.5 cm)
     title_cell = header_tbl.cell(0, 1)
     title_cell.width = Cm(20.5)
     p = title_cell.paragraphs[0]
@@ -133,6 +140,12 @@ def export_docx(data, info, logo_path=None):
     r.bold = True
     r.font.name = "Arial"
     r.font.size = Pt(24)
+    
+    # Terapkan lebar ke kedua sel agar proporsional (1:4.5)
+    header_tbl.columns[0].width = Cm(4.5)
+    header_tbl.columns[1].width = Cm(20.5)
+    header_tbl.cell(0, 0).width = Cm(4.5)
+    header_tbl.cell(0, 1).width = Cm(20.5)
 
     doc.add_paragraph()
 
@@ -140,15 +153,12 @@ def export_docx(data, info, logo_path=None):
     t1 = doc.add_table(rows=2, cols=4)
     t1.style = "Table Grid"
     headers1 = ["Teacher's Name", "Subject", "Time & Duration", "Unit / Elemen"]
-    
-    # Mengambil Unit/Elemen dari info (app.py)
     values1 = [
         info.get("teacher", "-"),
         info.get("subject", "-"),
         info.get("duration", "-"),
-        info.get("unit_elemen", "-"), 
+        info.get("unit_elemen", "-"),
     ]
-    
     for i in range(4):
         _write_cell(t1.cell(0, i), headers1[i], bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
         _shade_cell(t1.cell(0, i), HEADER_FILL)
@@ -161,7 +171,6 @@ def export_docx(data, info, logo_path=None):
     t2 = doc.add_table(rows=2, cols=4)
     t2.style = "Table Grid"
     headers2 = ["Term/SMT", "Class", "Phase", "Assessment"]
-    # Menggunakan class_level (S2) untuk kolom Class
     values2 = [info.get("term", "-"), info.get("class_level", "-"), info.get("phase", "-"), "-"]
     for i in range(4):
         _write_cell(t2.cell(0, i), headers2[i], bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
@@ -199,16 +208,34 @@ def export_docx(data, info, logo_path=None):
 
     t3 = doc.add_table(rows=len(content_rows), cols=2)
     t3.style = "Table Grid"
+    t3.autofit = False
+    t3.allow_autofit = False
+
     for i, (label, content) in enumerate(content_rows):
         _write_cell(t3.cell(i, 0), label, bold=True)
         _shade_cell(t3.cell(i, 0), HEADER_FILL)
-        # Khusus baris "Learning Outcomes" (cp_text) → JUSTIFY
         is_cp_row = ("learning outcomes" in label.lower()) or ("capaian pembelajaran" in label.lower())
         align = WD_ALIGN_PARAGRAPH.JUSTIFY if is_cp_row else WD_ALIGN_PARAGRAPH.LEFT
         _write_cell(t3.cell(i, 1), content, align=align)
+        
+    # Kunci tabel agar pas 100% lebar halaman (TIDAK GESER KE KANAN)
+    tblPr = t3._tbl.tblPr
+    tblW = OxmlElement('w:tblW')
+    tblW.set(qn('w:w'), '5000')
+    tblW.set(qn('w:type'), 'pct')
+    tblPr.append(tblW)
+    
+    layout = OxmlElement('w:tblLayout')
+    layout.set(qn('w:type'), 'fixed')
+    tblPr.append(layout)
+    
+    # Terapkan rasio 1 : 3 (6.5 cm : 19.5 cm)
+    t3.columns[0].width = Cm(6)
+    t3.columns[1].width = Cm(19)
+    
     for row in t3.rows:
         row.cells[0].width = Cm(6)
-        row.cells[1].width = Cm(19.5)
+        row.cells[1].width = Cm(19)
 
     doc.add_paragraph()
 
@@ -256,11 +283,6 @@ def export_docx(data, info, logo_path=None):
     r.bold = True
     r.font.name = "Arial"
     r.font.size = Pt(12)
-    
-    p = doc.add_paragraph()
-    r = p.add_run("(Cambridge-style learning objectives per meeting; 3 default objectives.)")
-    r.font.name = "Arial"
-    r.font.size = Pt(12)
 
     doc.add_paragraph()
 
@@ -281,14 +303,14 @@ def export_docx(data, info, logo_path=None):
             br.font.size = Pt(12)
         doc.add_paragraph()
 
-    # ---------- 5E table per meeting ----------
+    # ---------- 5E / 6-Stage table per meeting ----------
     stage_desc = {
-        "Tuning In": "Spark curiosity and connect to prior knowledge.",
-        "Finding Out": "Gathering new information from different sources.",
-        "Sorting Out": "Organizing and making sense of the information collected.",
-        "Going Further": "Deepening the inquiry by exploring new questions.",
-        "Making Conclusions": "Synthesizing understanding, forming opinions, and making meaning.",
-        "Taking Actions": "Applying new knowledge in meaningful ways.",
+        "Tuning In":          "Spark curiosity and connect to prior knowledge.",
+        "Finding Out":        "Gathering new information from different sources.",
+        "Sorting Out":        "Organising and making sense of the information collected.",
+        "Going Further":      "Deepening the inquiry by exploring new questions.",
+        "Making Conclusions": "Synthesising understanding, forming opinions, and making meaning.",
+        "Taking Actions":     "Applying new knowledge in meaningful ways.",
     }
 
     for m in data.get("meetings", []):
@@ -315,6 +337,7 @@ def export_docx(data, info, logo_path=None):
         meeting_title = f"Meeting {m['number']} ({m.get('day_date', 'TBD')})"
         _write_cell(cell_title, meeting_title, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
 
+        # Understanding block (rows 2-4)
         cell_und = table.cell(2, 0).merge(table.cell(4, 0))
         _write_cell(cell_und, "Understanding\n(Memahami)", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
         for idx, stage_name in enumerate(["Tuning In", "Finding Out", "Sorting Out"]):
@@ -324,6 +347,7 @@ def export_docx(data, info, logo_path=None):
             _write_cell(table.cell(row_idx, 2), sd.get("activity", "-"))
             _write_cell(table.cell(row_idx, 3), sd.get("values", "-"))
 
+        # Application block (rows 5-7)
         cell_app = table.cell(5, 0).merge(table.cell(7, 0))
         _write_cell(cell_app, "Application\n(Aplikasi)", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
         for idx, stage_name in enumerate(["Going Further", "Making Conclusions", "Taking Actions"]):
@@ -333,6 +357,7 @@ def export_docx(data, info, logo_path=None):
             _write_cell(table.cell(row_idx, 2), sd.get("activity", "-"))
             _write_cell(table.cell(row_idx, 3), sd.get("values", "-"))
 
+        # Assessment row (row 8)
         _write_cell(table.cell(8, 0), "Assessment & Reflection", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
         _write_cell(table.cell(8, 1), "Assessment and Student Reflection")
         cell_assess = table.cell(8, 2).merge(table.cell(8, 3))
@@ -346,7 +371,7 @@ def export_docx(data, info, logo_path=None):
     r.bold = True
     r.font.name = "Arial"
     r.font.size = Pt(12)
-    
+
     for note in [
         "Please attach all teaching materials used during this week's lesson, such as "
         "worksheets, presentation slides (PPT), assessment rubrics, learning media, or "
