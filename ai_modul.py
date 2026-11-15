@@ -1,570 +1,237 @@
-"""app.py — Streamlit UI: Modul Ajar Generator (No-API, Paste-to-Claude).
-
-Flow:
-  STEP 1: Build modul prompt (CP otomatis dari CP_GRAPH)
-  STEP 2: Copy modul prompt ke Claude
-  STEP 3: Paste modul JSON -> preview -> export DOCX
-"""
-import datetime
+"""ai_modul.py — Core: prompt builder, JSON parser, CP lookup."""
 import json
-import pandas as pd
-import streamlit as st
+import re
 
-from ai_modul import (
-    build_modul_prompt,
-    _normalize, _parse_json,
-    BLOOM_LEVELS, SUBJECTS, get_cp,
-)
-from docx_io import export_docx
-from file_io import extract_text_from_file
-
-st.set_page_config(page_title="Modul Ajar Generator", page_icon="📚", layout="wide")
-
-
-# =========================================================
-# Helper tanggal
-# =========================================================
-DAYS_EN = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-MONTHS_EN = ["January", "February", "March", "April", "May", "June",
-             "July", "August", "September", "October", "November", "December"]
-
-
-def format_date_en(d):
-    if isinstance(d, datetime.date):
-        return f"{DAYS_EN[d.weekday()]}, {d.day} {MONTHS_EN[d.month-1]} {d.year}"
-    return str(d) if d else ""
-
-
-# =========================================================
-# Mapping Kelas → Fase (single source of truth)
-# =========================================================
-CLASS_LEVEL_OPTIONS = [
-    "K1", "K2",          # Fase A (SD 1-2)
-    "K3", "K4",          # Fase B (SD 3-4)
-    "P5", "P6",          # Fase C (SD 5-6)
-    "J1", "J2", "J3",    # Fase D (SMP 7-9)
-    "S1",                # Fase E (SMA/SMK 10)
-    "S2", "S3",          # Fase F (SMA/SMK 11-12)
+# ---------------------------------------------------------
+# Konstanta
+# ---------------------------------------------------------
+BLOOM_LEVELS = [
+    "Mengingat", "Memahami", "Menerapkan",
+    "Menganalisis", "Mengevaluasi", "Mencipta",
 ]
 
-PHASE_MAP = {
-    "K1": "A", "K2": "A",
-    "K3": "B", "K4": "B",
-    "P5": "C", "P6": "C",
-    "J1": "D", "J2": "D", "J3": "D",
-    "S1": "E",
-    "S2": "F", "S3": "F",
+SUBJECTS = [
+    "Language and Literature",
+    "Language Acquisition",
+    "Health and Physical Education",
+    "Sciences",
+    "Mathematics",
+    "Arts",
+    "Design",
+    "Individuals and Societies",
+]
+
+# ---------------------------------------------------------
+# CP_GRAPH — ISI SENDIRI sesuai data sekolah Anda
+# Format key: (fase, kelas, subject)  →  value: list CP
+# Contoh di bawah, silakan tambah/hapus.
+# ---------------------------------------------------------
+CP_GRAPH = {
+    ("D", "J2", "Computer Science"): [
+        "Students will be able to design, develop, test, deploy and evaluate modern, responsive and accessible websites by using semantic HTML to create well-structured, meaningful and search-engine-friendly documents, and CSS to implement maintainable layouts and visual systems through mobile-first responsive design, Flexbox, CSS Grid, custom properties, media queries and component-based styling conventions, while applying accessibility best practices such as appropriate landmark elements, ARIA roles and attributes where necessary, keyboard navigation, focus management, colour-contrast compliance and screen-reader-friendly content. They will use JavaScript ES6+ to add interactivity and handle asynchronous data, demonstrating competence in variables, functions, modules, array and object manipulation, DOM selection and manipulation, event handling and delegation, form validation and user feedback, error handling with try/catch, promises and async/await, fetching and processing data from external APIs, managing loading and error states, and using browser storage such as localStorage where appropriate. Learners will apply Bootstrap to accelerate the creation of consistent and responsive user interfaces by customising its grid system, spacing utilities, typography and components, overriding default variables and styles to maintain a coherent visual identity, and ensuring that Bootstrap-based interfaces remain accessible and responsive across devices. They will use React to build reusable component-based interfaces with state management through hooks such as useState, useEffect, useContext and useReducer, managing component lifecycle and side effects, lifting state where necessary, passing data through props, handling events and forms in a controlled manner, conditionally rendering UI, composing components into modular and maintainable file structures, and applying basic testing and debugging practices. Learners will employ Next.js to implement routing and appropriate rendering strategies, including Static Site Generation (SSG), Server-Side Rendering (SSR), Incremental Static Regeneration (ISR) and Client-Side Rendering (CSR), selecting strategies according to content dynamism and performance requirements, while applying basic SEO optimisation through metadata management, semantic markup, sitemap and robots considerations, image optimisation using the Next.js Image component, font optimisation, code splitting and performance best practices. Finally, they will use Netlify to build and deploy applications automatically to a public domain through Git repository integration, configuring build commands and publish directories, managing environment variables, redirects and rewrites, integrating basic serverless functions where required, using deploy previews and rollbacks, and applying version control with Git and collaborative workflows such as branching, pull requests and code review. Throughout the process, learners will demonstrate systematic problem-solving, document their design and development decisions, evaluate the usability, accessibility, performance and security of their deployed applications, and consider ethical, social and professional responsibilities in the creation and publication of web-based solutions.",
+    ],
+    ("D", "J3", "Computer Science"):[
+        "Students will be able to apply Design Thinking as a structured, human-centred approach to problem-solving by empathising with users through interviews and observations, defining problems clearly using tools such as personas and journey maps, generating and evaluating ideas through divergent and convergent thinking, and building low-fidelity and high-fidelity prototypes that are tested and iterated based on user feedback. They will explain and perform operations on binary number systems, including conversion between binary, decimal, octal and hexadecimal, binary arithmetic (addition, subtraction and multiplication), representation of signed and unsigned integers, and the basic principles of floating-point representation. Learners will describe the fundamentals of computer networks, including network topologies (bus, star, ring, mesh), transmission media, common network devices, the OSI and TCP/IP reference models, IP addressing and subnetting, and core protocols such as HTTP, DNS, DHCP and TCP/UDP, as well as apply basic troubleshooting techniques. They will explain the organisation and architecture of computer systems, including the von Neumann architecture, CPU components (ALU, control unit, registers), the instruction cycle, pipelining, memory hierarchy (registers, cache, RAM, secondary storage), input/output mechanisms, and the distinction between RISC and CISC architectures. Learners will write basic C++ programs using variables, data types, operators, control structures (sequence, selection and iteration), functions, arrays, basic pointers, file input/output and modular programming practices, while applying debugging techniques and adhering to good coding conventions. They will design database entity-relationship diagrams (ERDs) by identifying entities, attributes and relationships, specifying cardinality and participation constraints, recognising weak entities and associative entities, applying normalisation principles up to the third normal form (3NF), and mapping ERDs to relational schemas. Throughout, learners will demonstrate logical reasoning, systematic problem-solving, collaboration and effective communication of technical solutions, and will consider ethical, social and professional responsibilities in the design and use of computing systems."
+    ],
+    ("D", "J1", "Health and Physical Education"):[
+        "At the end of Phase D, students are projected to be able to practise the analysis of specific movement skills, carry out fitness training in accordance with established principles, and prioritise personal and social responsibility, and broadly, the Physical Education, Sport, and Health (PJOK) learning outcomes for junior high school are divided into four main elements, namely movement skills, which involve practising the results of specific movement analysis covering games and sports such as invasion, net, and field games, gymnastics, rhythmic movement, and water sports, movement knowledge, which involves understanding, analysing, and evaluating the concepts and strategies of various physical activities, movement utilisation, which involves improving physical fitness related to both health and skills and understanding the prevention of non-communicable diseases, and character development, which involves demonstrating cooperation, fair play values, and independence in monitoring personal fitness."
+    ],
+    ("D", "J2", "Health and Physical Education"):[
+        "At the end of Phase D, students are projected to be able to practise the analysis of specific movement skills, carry out fitness training in accordance with established principles, and prioritise personal and social responsibility, and broadly, the Physical Education, Sport, and Health (PJOK) learning outcomes for junior high school are divided into four main elements, namely movement skills, which involve practising the results of specific movement analysis covering games and sports such as invasion, net, and field games, gymnastics, rhythmic movement, and water sports, movement knowledge, which involves understanding, analysing, and evaluating the concepts and strategies of various physical activities, movement utilisation, which involves improving physical fitness related to both health and skills and understanding the prevention of non-communicable diseases, and character development, which involves demonstrating cooperation, fair play values, and independence in monitoring personal fitness."
+    ],
+    ("E", "S1", "Health and Physical Education"):[
+        "At the end of phase E, students focus on evaluating, applying and refining movement skills and healthy lifestyle behaviours, and broadly, the Phase E learning outcomes are divided into four main elements, namely movement skills, in which students are able to design, apply, refine and develop movement strategies in various challenging situations through varied activities such as games, athletics, gymnastics, rhythmic movement and water sports, movement knowledge, in which students analyse the impact of applying movement concepts on skills and understand scientific facts, mechanical principles and tactical strategies in sport, movement utilisation, in which students evaluate the impact of physical activity on fitness and health and apply biomotor training and healthy lifestyle practices, and character and movement values development, in which students demonstrate fair play, ethical behaviour, leadership, collaboration and resilience in facing training and competition pressure."
+    ],
+    ("E", "S1", "Computer Science"):[
+        "Students will be able to use Google Colab as a cloud-based computational environment to write, execute, debug and document Python code for end-to-end data science workflows, including organising notebooks with Markdown documentation, installing and managing third-party libraries, mounting Google Drive for persistent storage, importing and exporting data from local and cloud sources, using GPU and TPU runtimes where appropriate, and collaborating in real time through shared notebooks, comments and version history; collect data systematically from multiple sources by performing web scraping using libraries such as Requests, BeautifulSoup, Scrapy and Selenium to extract data from static and dynamically rendered web pages while handling pagination, rate limiting and session management, and by collecting data through public APIs with authentication, JSON and XML response handling and rate-limit management, as well as through file-based sources such as CSV, Excel, JSON and SQL databases and open data portals, while respecting legal and ethical considerations including robots.txt protocols, terms of service, copyright, data privacy regulations such as GDPR principles, consent and anonymisation of personal data; clean and prepare raw data for analysis by identifying and handling missing values through deletion, imputation or interpolation, removing duplicate records, detecting and treating outliers using statistical and visual methods, standardising inconsistent formats such as dates, currencies and text encodings, converting data types appropriately, normalising and scaling numerical features, encoding categorical variables, and correcting structural errors such as misaligned columns and inconsistent naming conventions; modify and transform data using pandas and NumPy through filtering, sorting, merging, joining, concatenating and reshaping datasets, grouping and aggregating data with pivot tables and groupby operations, creating derived features and calculated columns, applying window functions and time-series transformations, and restructuring data between wide and long formats to suit analytical needs; perform exploratory data analysis by computing descriptive statistics, examining distributions, identifying correlations and patterns and formulating initial hypotheses, and create meaningful and accurate data visualisations using Matplotlib, Seaborn and Plotly by selecting appropriate chart types for different data and analytical purposes, applying principles of clarity, accuracy, labelling and accessibility, customising visual elements such as colours, scales and annotations, and constructing multi-panel and interactive visualisations to communicate insights effectively; and apply foundational data science concepts and methods—including descriptive and inferential statistics, correlation and regression analysis, basic hypothesis testing and introductory predictive modelling using libraries such as scikit-learn—to derive evidence-based insights and support decision-making, communicate findings through well-documented notebooks, structured reports and visual narratives, evaluate the quality, limitations, biases and ethical implications of their data and results, ensure reproducibility through clear documentation of code, data sources and analytical decisions, and demonstrate systematic problem-solving, critical thinking and effective communication of data-driven conclusions in individual and collaborative settings.They will design, implement and evaluate AI agents to automate and augment data science workflows—including agent-based data collection, cleaning, analysis and visualisation—using appropriate frameworks and tools while assessing their reliability, limitations and ethical implications."
+    ],
+    ("F", "S2", "Health and Physical Education"):[
+        "At the end of this phase F, students focus on three main elements of skill and character development, namely moving skilfully, in which they evaluate specific movement skills and strategies to improve performance in various challenging situations, learning through movement, in which they apply and evaluate movement strategies in new situations, uphold fair play, and reflect on the influence of ethical behaviour on physical activity, and evaluate decision-making strategies in teamwork involving leadership and collaboration, and living an active lifestyle, in which they actively participate in fitness activities and evaluate the impact and effectiveness of their strategies on long-term health."
+    ],
+    ("F", "S2", "Computer Science"): [
+        "Students will be able to explain the foundational concepts, scope and societal implications of artificial intelligence and apply machine learning workflows—including problem framing, data preparation, feature engineering, model selection, training, evaluation and interpretation—by distinguishing and implementing supervised learning models for classification and regression tasks using appropriate algorithms such as logistic regression, decision trees, random forests, support vector machines, k-nearest neighbours and linear regression, and unsupervised learning models such as clustering and dimensionality reduction using k-means, hierarchical clustering and principal component analysis; they will build, train and evaluate deep learning models using neural networks, including feedforward networks, convolutional neural networks and recurrent networks where appropriate, applying techniques such as activation functions, loss functions, optimisers, regularisation, dropout and hyperparameter tuning, and will evaluate model performance using suitable metrics including accuracy, precision, recall, F1-score, confusion matrices, mean absolute error, mean squared error, R-squared and cross-validation; they will apply natural language processing models and techniques—including text preprocessing, tokenisation, stemming and lemmatisation, stop-word removal, bag-of-words and TF-IDF representations, word embeddings, sentiment analysis and basic sequence modelling—to process and analyse textual data; and they will interpret results, assess model limitations such as overfitting, bias and data leakage, consider ethical, legal and social implications including privacy, fairness and transparency, communicate findings through structured documentation and visualisations, and demonstrate systematic problem-solving, critical thinking and responsible practice in individual and collaborative projects.",
+    ],
+    # Tambahkan entri lain sesuai kebutuhan.
 }
 
 
-# =========================================================
-# State initialization
-# =========================================================
-if "modul" not in st.session_state:
-    st.session_state["modul"] = None
-if "modul_info" not in st.session_state:
-    st.session_state["modul_info"] = {}
-if "prompt_ready" not in st.session_state:
-    st.session_state["prompt_ready"] = None
-if "cp_list" not in st.session_state:
-    st.session_state["cp_list"] = []
-if "meetings_list" not in st.session_state:
-    st.session_state["meetings_list"] = [{
-        "number": 1, "topic": "", "level": "Memahami",
-        "date_obj": datetime.date.today(),
-        "date": format_date_en(datetime.date.today()),
-    }]
+def get_cp(phase, class_level, subject):
+    key = (
+        str(phase).strip().upper(),
+        str(class_level).strip().upper(),
+        str(subject).strip(),
+    )
+    return list(CP_GRAPH.get(key, []))
 
 
-# =========================================================
-# SIDEBAR
-# =========================================================
-st.sidebar.title("📄 1. Upload Referensi (Opsional)")
-st.sidebar.caption("Upload Silabus/ATP untuk memperkaya prompt modul.")
-
-uploaded_doc = st.sidebar.file_uploader(
-    "Pilih file (PDF/DOCX/TXT)",
-    type=["pdf", "docx", "txt"],
-    label_visibility="collapsed",
-)
-
-ref_text = ""
-if uploaded_doc:
-    ref_text = extract_text_from_file(uploaded_doc)
-    if ref_text and not ref_text.startswith("Error"):
-        st.sidebar.success(f"Berhasil membaca dokumen ({len(ref_text)} karakter).")
+# ---------------------------------------------------------
+# Parser & normalizer JSON
+# ---------------------------------------------------------
+def _parse_json(text: str):
+    """Ekstrak & parse JSON dari respons Claude (boleh ada ```json fence)."""
+    s = (text or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.S)
+    if m:
+        s = m.group(1).strip()
     else:
-        st.sidebar.error("Gagal membaca file.")
+        start = s.find("{")
+        end = s.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            s = s[start:end + 1]
+    return json.loads(s)
 
-st.sidebar.divider()
-st.sidebar.title("🏫 2. Identitas Modul")
-teacher = st.sidebar.text_input("Nama Guru", value="Frederick Liko, S.Kom.", key="in_teacher")
 
-# Subject dropdown
-subject = st.sidebar.selectbox(
-    "Mata Pelajaran",
-    SUBJECTS,
-    index=2,               # default: Health and Physical Education
-    key="in_subject_sel",
-)
+def _as_str(v):
+    return "" if v is None else str(v).strip()
 
-jenjang = st.sidebar.selectbox(
-    "Jenjang Pendidikan (Untuk Judul)",
-    ["TK", "SD", "SMP", "SMA", "SMK"],
-    index=3, key="in_jenjang",
-)
 
-# Kelas dropdown — Fase auto-derive dari kelas
-class_level = st.sidebar.selectbox(
-    "Kelas (Untuk Kolom Tabel)",
-    CLASS_LEVEL_OPTIONS,
-    index=CLASS_LEVEL_OPTIONS.index("S2"),
-    key="in_class",
-)
-phase = PHASE_MAP.get(class_level, "F")
-st.sidebar.text_input("Fase (otomatis dari Kelas)", value=phase, disabled=True, key="in_phase_display")
+def _as_list(v):
+    if isinstance(v, list):
+        return v
+    if v in (None, ""):
+        return []
+    return [v]
 
-duration = st.sidebar.text_input("Durasi per Meeting", value="2 x 40 menit", key="in_dur")
-term = st.sidebar.text_input("Term / Semester", value="1/1", key="in_term")
-academic_year = st.sidebar.text_input("Tahun Ajaran", value="2026/2027", key="in_year")
-unit_elemen = st.sidebar.text_input("Unit / Elemen", value="AI Development", key="in_unit")
 
-st.sidebar.divider()
-st.sidebar.title("✍️ 3. Tanda Tangan")
+def _as_dict(v):
+    return v if isinstance(v, dict) else {}
 
-DEFAULT_REVIEWER = "Aldi Permana Sembiring, S.Pd., B.Ed., Gr"
 
-REVIEWER_MAP = {
-    "SD": "Mei Nila Lipina Sinaga, S.Pd., B.Ed., Gr",
-}
+def _normalize(parsed: dict, meetings_list: list):
+    """Pastikan schema seragam, isi field yang hilang dengan default."""
+    parsed = _as_dict(parsed)
+    parsed_meets = _as_list(parsed.get("meetings", []))
 
-APPROVER_MAP = {
-    "TK":  "Yuniarti Kristiany, S.Pd., B.SC., Gr",
-    "SD":  "Yuniarti Kristiany, S.Pd., B.SC., Gr",
-    "SMP": "Gabriel Joshua Bastiaans, S.Pd., B.Ed., Gr",
-    "SMA": "Sri Hartati Siahaan, S.TP., M.Pd., Gr",
-    "SMK": "Sri Hartati Siahaan, S.TP., M.Pd., Gr",
-}
+    meetings = []
+    for i, m in enumerate(meetings_list):
+        pm = _as_dict(parsed_meets[i]) if i < len(parsed_meets) else {}
 
-if st.session_state.get("_prev_jenjang") != jenjang:
-    st.session_state["_prev_jenjang"] = jenjang
-    st.session_state["in_reviewer"] = REVIEWER_MAP.get(jenjang, DEFAULT_REVIEWER)
-    st.session_state["in_approver"] = APPROVER_MAP.get(
-        jenjang, "Gabriel Joshua Bastiaans, S.Pd."
+        objectives = [_as_str(o) for o in _as_list(pm.get("objectives", [])) if _as_str(o)]
+
+        stages = []
+        for st in _as_list(pm.get("stages", [])):
+            st = _as_dict(st)
+            stages.append({
+                "stage": _as_str(st.get("stage", "")),
+                "activity": _as_str(st.get("activity", "")),
+                "values": _as_str(st.get("values", "")),
+            })
+
+        meetings.append({
+            "number": m["number"],
+            "topic": _as_str(pm.get("topic", "")) or _as_str(m.get("topic", "")),
+            "day_date": m.get("date", ""),
+            "level": m.get("level", ""),
+            "objectives": objectives,
+            "stages": stages,
+        })
+
+    kv = []
+    for v in _as_list(parsed.get("key_vocabulary", [])):
+        v = _as_dict(v)
+        kv.append({
+            "jp": _as_str(v.get("jp", v.get("word", v.get("term", "")))),
+            "romaji": _as_str(v.get("romaji", v.get("pronunciation", ""))),
+            "arti": _as_str(v.get("arti", v.get("meaning", ""))),
+        })
+
+    si = _as_dict(parsed.get("subject_integration", {}))
+    si_subjects = []
+    for x in _as_list(si.get("subjects", [])):
+        x = _as_dict(x)
+        si_subjects.append({
+            "subject": _as_str(x.get("subject", "")),
+            "connection": _as_str(x.get("connection", "")),
+            "daily_life": _as_str(x.get("daily_life", "")),
+        })
+
+    cb = {
+        _as_str(k): _as_str(v)
+        for k, v in _as_dict(parsed.get("character_building", {})).items()
+    }
+
+    return {
+        "learning_outcomes": _as_str(parsed.get("learning_outcomes", "")),
+        "prior_knowledge": [_as_str(x) for x in _as_list(parsed.get("prior_knowledge", [])) if _as_str(x)],
+        "guiding_questions": [_as_str(x) for x in _as_list(parsed.get("guiding_questions", [])) if _as_str(x)],
+        "enduring_understanding": _as_str(parsed.get("enduring_understanding", "")),
+        "key_vocabulary": kv,
+        "resources_materials": [_as_str(x) for x in _as_list(parsed.get("resources_materials", [])) if _as_str(x)],
+        "subject_integration": {"subjects": si_subjects},
+        "character_building": cb,
+        "meetings": meetings,
+        "assessment_reflection": _as_str(parsed.get("assessment_reflection", "")),
+    }
+
+
+# ---------------------------------------------------------
+# Prompt builder
+# ---------------------------------------------------------
+def build_modul_prompt(*, teacher, subject, class_level, phase, duration, term,
+                       meetings, reference_text="", cp_list=None):
+    cp_list = cp_list or []
+
+    meeting_lines = "\n".join(
+        f"- Meeting {m['number']}: {m.get('topic', '').strip() or '(tanpa topik)'} "
+        f"| Level Kognitif: {m.get('level', '')} | Tanggal: {m.get('date', '')}"
+        for m in meetings
     )
+    cp_block = "\n".join(f"{i+1}. {cp}" for i, cp in enumerate(cp_list)) or "(belum ada CP)"
+    ref_block = reference_text.strip() or "(tidak ada referensi tambahan)"
 
-reviewer = st.sidebar.text_input("Reviewed by", key="in_reviewer")
-approver = st.sidebar.text_input("Approved by", key="in_approver")
-place = st.sidebar.text_input("Kota", value="Medan")
+    schema = """{
+  "learning_outcomes": "string",
+  "prior_knowledge": ["string", "..."],
+  "guiding_questions": ["string", "..."],
+  "enduring_understanding": "string",
+  "key_vocabulary": [{"jp": "term", "romaji": "romanization", "arti": "meaning"}],
+  "resources_materials": ["string", "..."],
+  "subject_integration": {
+    "subjects": [
+      {"subject": "...", "connection": "...", "daily_life": "..."}
+    ]
+  },
+  "character_building": {"Dimensi": "Deskripsi"},
+  "meetings": [
+    {
+      "topic": "string",
+      "objectives": ["string", "..."],
+      "stages": [
+        {"stage": "Finding Out", "activity": "...", "values": "..."},
+        {"stage": "Sorting Out", "activity": "...", "values": "..."},
+        {"stage": "Going Further", "activity": "...", "values": "..."},
+        {"stage": "Making Connections", "activity": "...", "values": "..."},
+        {"stage": "Taking Action", "activity": "...", "values": "..."}
+      ]
+    }
+  ],
+  "assessment_reflection": "string"
+}"""
 
-st.sidebar.divider()
-st.sidebar.info(
-    "ℹ️ **Mode No-API**\n\n"
-    "Prompt dibangun **lokal**, Anda paste ke **Claude.ai**, "
-    "lalu paste JSON balik ke app ini untuk **export DOCX**.\n\n"
-    "CP otomatis dimuat dari **CP_GRAPH** berdasarkan Kelas + Subject.\n\n"
-    "Tidak ada API key, tidak ada biaya otomatis."
-)
+    return f"""Anda adalah perancang kurikulum berpengalaman. Buatkan **satu Modul Ajar** lengkap dalam format **JSON valid** (tanpa teks lain di luar JSON).
 
+# IDENTITAS MODUL
+- Guru: {teacher}
+- Mata Pelajaran: {subject}
+- Kelas / Fase: {class_level} / Fase {phase}
+- Durasi per meeting: {duration}
+- Term / Semester: {term}
 
-# =========================================================
-# HALAMAN UTAMA — Dynamic Meetings
-# =========================================================
-st.title("📚 Modul Ajar Generator")
-st.markdown(
-    "**Flow:** STEP 1 (build prompt modul) → STEP 2 (copy ke Claude) → "
-    "STEP 3 (paste JSON balik) → Export DOCX. "
-    "CP otomatis dimuat dari **CP_GRAPH**."
-)
+# CAPAIAN PEMBELAJARAN (CP)
+{cp_block}
 
-for i, m in enumerate(st.session_state["meetings_list"]):
-    with st.container(border=True):
-        c1, c2, c3, c4 = st.columns([3, 1.5, 2, 0.5])
-        m["topic"] = c1.text_input(
-            f"Topik Meeting {m['number']}",
-            value=m["topic"], key=f"topic_{i}",
-        )
-        m["level"] = c2.selectbox(
-            f"Level Kognitif {m['number']}",
-            BLOOM_LEVELS,
-            index=BLOOM_LEVELS.index(m["level"]),
-            key=f"level_{i}",
-        )
-        default_date = m.get("date_obj") or datetime.date.today()
-        date_val = c3.date_input(f"Tanggal M{m['number']}", value=default_date, key=f"date_{i}")
-        m["date_obj"] = date_val
-        m["date"] = format_date_en(date_val)
+# MEETINGS
+{meeting_lines}
 
-        if len(st.session_state["meetings_list"]) > 1:
-            if c4.button("🗑️", key=f"del_{i}", help="Hapus meeting ini"):
-                st.session_state["meetings_list"].pop(i)
-                for j, x in enumerate(st.session_state["meetings_list"]):
-                    x["number"] = j + 1
-                st.rerun()
+# REFERENSI TAMBAHAN
+{ref_block}
 
-st.write("")
-if st.button("➕ Tambah Meeting", use_container_width=True):
-    st.session_state["meetings_list"].append({
-        "number": len(st.session_state["meetings_list"]) + 1,
-        "topic": "", "level": "Memahami",
-        "date_obj": datetime.date.today(),
-        "date": format_date_en(datetime.date.today()),
-    })
-    st.rerun()
-
-st.divider()
-
-
-# =========================================================
-# AUTO-LOAD CP (silent) dari CP_GRAPH
-# =========================================================
-cp_key = (
-    str(phase).strip().upper(),
-    str(class_level).strip().upper(),
-    str(subject).strip(),
-)
-if st.session_state.get("_cp_key") != cp_key:
-    st.session_state["_cp_key"] = cp_key
-    st.session_state["cp_list"] = get_cp(phase, class_level, subject)
-    st.session_state.pop("cp_edit_box", None)
-
-# Expander ringkas untuk review / edit CP (opsional)
-cp_current = st.session_state.get("cp_list", [])
-with st.expander(
-    f"🎯 Capaian Pembelajaran — {len(cp_current)} item "
-    f"(Fase {phase} · {class_level} · {subject}) — klik untuk lihat/edit",
-    expanded=False,
-):
-    if cp_current:
-        st.caption(
-            f"CP dimuat otomatis dari `CP_GRAPH` untuk "
-            f"Fase **{phase}** / Kelas **{class_level}** / **{subject}**. "
-            "Bisa diedit di bawah (satu CP per baris)."
-        )
-    else:
-        st.caption(
-            f"CP untuk Fase **{phase}** / Kelas **{class_level}** / **{subject}** "
-            "masih kosong. Silakan isi manual di bawah, "
-            "atau tambahkan di `CP_GRAPH` pada `ai_modul.py`."
-        )
-
-    cp_text_current = "\n".join(cp_current)
-    edited_cp = st.text_area(
-        "Satu CP per baris. Kosongkan baris yang tidak dipakai.",
-        value=cp_text_current, height=200, key="cp_edit_box",
-        label_visibility="collapsed",
-    )
-    new_cp_list = [line.strip() for line in edited_cp.split("\n") if line.strip()]
-    if new_cp_list != cp_current:
-        st.session_state["cp_list"] = new_cp_list
-
-    st.caption(f"ℹ️ {len(new_cp_list)} CP aktif.")
-
-
-# =========================================================
-# STEP 1 — Build modul prompt
-# =========================================================
-st.header("📝 STEP 1 — Build Prompt Modul Ajar")
-
-if st.button("🚀 Build Prompt Modul", type="primary", use_container_width=True):
-    empty_topics = [m["number"] for m in st.session_state["meetings_list"] if not m["topic"].strip()]
-    if empty_topics:
-        st.error(f"Topik Meeting {', '.join(map(str, empty_topics))} masih kosong!")
-    else:
-        if not st.session_state.get("cp_list"):
-            st.warning("⚠️ Belum ada CP. Modul tetap bisa di-generate, tapi lebih baik isi CP dulu.")
-        try:
-            prompt = build_modul_prompt(
-                teacher=teacher, subject=subject, class_level=class_level,
-                phase=phase, duration=duration, term=term,
-                meetings=st.session_state["meetings_list"],
-                reference_text=ref_text,
-                cp_list=st.session_state.get("cp_list", []),
-            )
-            st.session_state["prompt_ready"] = prompt
-            st.session_state["modul_info"] = {
-                "teacher": teacher, "subject": subject,
-                "class_level": class_level, "jenjang": jenjang,
-                "phase": phase, "duration": duration, "term": term,
-                "reviewer": reviewer, "approver": approver,
-                "place": place, "date": format_date_en(datetime.date.today()),
-                "academic_year": academic_year,
-                "topic": f"{len(st.session_state['meetings_list'])} Meetings",
-                "unit_elemen": unit_elemen,
-            }
-            st.success("✅ Modul prompt siap. Lanjut ke STEP 2.")
-        except Exception as e:
-            st.error(f"Gagal build prompt: {e}")
-
-
-# =========================================================
-# STEP 2 — Display modul prompt
-# =========================================================
-if st.session_state.get("prompt_ready"):
-    st.divider()
-    st.header("📋 STEP 2 — Copy Modul Prompt ke Claude.ai")
-    st.info(
-        "1. Klik **Copy** di pojok kanan atas kotak hitam\n"
-        "2. Paste ke [claude.ai](https://claude.ai)\n"
-        "3. Tunggu selesai (30–120 detik, tergantung jumlah meeting)\n"
-        "4. **Ctrl+A → Ctrl+C** untuk copy seluruh jawaban Claude\n"
-        "5. Lanjut ke STEP 3"
-    )
-    st.code(st.session_state["prompt_ready"], language="text")
-    st.download_button(
-        "⬇️ Download Modul Prompt (.txt)",
-        data=st.session_state["prompt_ready"],
-        file_name="prompt_modul.txt",
-        mime="text/plain",
-        use_container_width=True,
-    )
-
-
-# =========================================================
-# STEP 3 — Paste modul JSON
-# =========================================================
-if st.session_state.get("prompt_ready"):
-    st.divider()
-    st.header("📥 STEP 3 — Paste Jawaban Modul (JSON)")
-
-    pasted = st.text_area(
-        "Paste seluruh respons Claude di sini (boleh termasuk ```json ... ```):",
-        height=320, key="pasted_json",
-        placeholder='{"learning_outcomes": "", "prior_knowledge": [...], ...}',
-    )
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        if st.button("🔍 Parse & Preview Modul", type="primary", use_container_width=True):
-            if not pasted or not pasted.strip():
-                st.error("Kotak paste masih kosong.")
-            else:
-                try:
-                    parsed = _parse_json(pasted)
-                    normalized = _normalize(parsed, st.session_state["meetings_list"])
-
-                    # Inject CP dari CP_GRAPH ke learning_outcomes
-                    cp_list = st.session_state.get("cp_list", [])
-                    if cp_list:
-                        normalized["learning_outcomes"] = "\n".join(
-                            f"{i+1}. {cp}" for i, cp in enumerate(cp_list)
-                        )
-
-                    st.session_state["modul"] = normalized
-                    st.success(f"✅ Berhasil parse — {len(normalized['meetings'])} meeting, {len(cp_list)} CP.")
-                    st.rerun()
-                except json.JSONDecodeError as e:
-                    st.error(
-                        f"❌ JSON tidak valid: {e}\n\n"
-                        "Kemungkinan: jawaban terpotong / copy tidak lengkap / "
-                        "ada teks di luar JSON."
-                    )
-                except Exception as e:
-                    st.error(f"❌ Gagal parse: {e}")
-    with c2:
-        if st.button("🧹 Reset Prompt", use_container_width=True):
-            st.session_state.pop("prompt_ready", None)
-            st.session_state.pop("pasted_json", None)
-            st.rerun()
-
-
-# =========================================================
-# RENDER HASIL MODUL
-# =========================================================
-data = st.session_state["modul"]
-info = st.session_state["modul_info"]
-
-if data:
-    st.divider()
-    st.subheader(f"✏️ Preview Modul ({info.get('topic', '')})")
-
-    def collect():
-        def get(key, default):
-            return st.session_state.get(key, default)
-
-        kv_edited = get("e_kv", None)
-        kv = kv_edited.to_dict("records") if isinstance(kv_edited, pd.DataFrame) else data["key_vocabulary"]
-
-        cb_edited = get("e_cb", None)
-        cb = (
-            {row["Dimensi"]: row["Deskripsi"] for _, row in cb_edited.iterrows()}
-            if isinstance(cb_edited, pd.DataFrame)
-            else data["character_building"]
-        )
-
-        si_edited = get("e_si", None)
-        if isinstance(si_edited, pd.DataFrame):
-            si_subjects = si_edited.to_dict("records")
-        else:
-            si_subjects = (data.get("subject_integration") or {}).get("subjects", [])
-
-        meetings = []
-        for i, m in enumerate(data["meetings"]):
-            edited = get(f"e_meet_{i}", None)
-            stages = edited.to_dict("records") if isinstance(edited, pd.DataFrame) else m["stages"]
-
-            obj_list = st.session_state.get(f"list_obj_{i}", m.get("objectives", []))
-            objs = [str(o).strip() for o in obj_list if str(o).strip() and o != "-"]
-            if not objs:
-                objs = ["-"]
-
-            meetings.append({**m, "stages": stages, "objectives": objs})
-
-        lo_edited = get("e_lo", data["learning_outcomes"])
-
-        return {
-            "learning_outcomes": lo_edited,
-            "prior_knowledge": [get(f"e_pk_{i}", x) for i, x in enumerate(data["prior_knowledge"])],
-            "guiding_questions": [get(f"e_gq_{i}", x) for i, x in enumerate(data["guiding_questions"])],
-            "enduring_understanding": get("e_eu", data["enduring_understanding"]),
-            "key_vocabulary": kv,
-            "resources_materials": [get(f"e_rm_{i}", x) for i, x in enumerate(data["resources_materials"])],
-            "subject_integration": {"subjects": si_subjects},
-            "character_building": cb,
-            "meetings": meetings,
-            "assessment_reflection": get("e_ar", data["assessment_reflection"]),
-        }
-
-    tab1, tab2, tab3 = st.tabs(["📋 Tujuan & Konteks", "📖 Vocab & Karakter", "🔄 Inquiring Cycle"])
-
-    with tab1:
-        st.text_area(
-            "Capaian Pembelajaran (dari CP_GRAPH, bisa diedit)",
-            value=data["learning_outcomes"], height=180, key="e_lo",
-        )
-        st.markdown("**Prior Knowledge**")
-        for i, x in enumerate(data["prior_knowledge"]):
-            st.text_input(f"PK {i+1}", value=x, key=f"e_pk_{i}")
-        st.markdown("**Guiding Questions**")
-        for i, x in enumerate(data["guiding_questions"]):
-            st.text_input(f"GQ {i+1}", value=x, key=f"e_gq_{i}")
-        st.text_area("Enduring Understanding", value=data["enduring_understanding"], key="e_eu")
-
-    with tab2:
-        st.markdown("**Key Vocabulary**")
-        kv_df = pd.DataFrame(data["key_vocabulary"] or [{"jp": "", "romaji": "", "arti": ""}])
-        st.data_editor(kv_df, num_rows="dynamic", use_container_width=True, key="e_kv", hide_index=True)
-
-        st.markdown("**Resources**")
-        for i, x in enumerate(data["resources_materials"]):
-            st.text_input(f"Resource {i+1}", value=x, key=f"e_rm_{i}")
-
-        st.markdown("**Subject Integration & Daily Life Implementation**")
-        si_subjects = (data.get("subject_integration") or {}).get("subjects", [])
-        si_df = pd.DataFrame(si_subjects) if si_subjects else pd.DataFrame(
-            [{"subject": "", "connection": "", "daily_life": ""}]
-        )
-        st.data_editor(
-            si_df, num_rows="dynamic", use_container_width=True, key="e_si",
-            hide_index=True,
-            column_config={
-                "subject":    st.column_config.TextColumn("Integrated Subject", width="medium"),
-                "connection": st.column_config.TextColumn("Connection to Topic", width="large"),
-                "daily_life": st.column_config.TextColumn("Daily Life Implementation", width="large"),
-            },
-        )
-
-        st.markdown("**Character Building**")
-        cb_df = pd.DataFrame([{"Dimensi": k, "Deskripsi": v} for k, v in data["character_building"].items()])
-        st.data_editor(cb_df, use_container_width=True, key="e_cb", hide_index=True, disabled=["Dimensi"])
-
-    with tab3:
-        for i, m in enumerate(data["meetings"]):
-            st.markdown(f"### Meeting {m['number']}: {m.get('topic', '')} (`{m['day_date']}`)")
-
-            state_key = f"list_obj_{i}"
-            if state_key not in st.session_state:
-                initial_objs = list(m.get("objectives", []))
-                while len(initial_objs) < 3:
-                    initial_objs.append("")
-                st.session_state[state_key] = initial_objs
-
-            st.markdown("**Tujuan Pembelajaran:**")
-
-            to_delete = None
-            for j, obj in enumerate(st.session_state[state_key]):
-                c1, c2 = st.columns([11, 1])
-                new_obj = c1.text_area(
-                    f"Tujuan M{m['number']}.{j+1}",
-                    value=obj,
-                    key=f"e_obj_{i}_{j}_{len(st.session_state[state_key])}",
-                    label_visibility="collapsed",
-                    height=68,
-                )
-                st.session_state[state_key][j] = new_obj
-
-                if c2.button("🗑️", key=f"del_obj_{i}_{j}", help="Hapus tujuan ini"):
-                    to_delete = j
-
-            if to_delete is not None:
-                st.session_state[state_key].pop(to_delete)
-                st.rerun()
-
-            if st.button("➕ Tambah Tujuan", key=f"add_obj_{i}"):
-                st.session_state[state_key].append("")
-                st.rerun()
-
-            st.write("")
-
-            stages_df = pd.DataFrame(m["stages"])
-            st.data_editor(
-                stages_df, use_container_width=True, hide_index=True,
-                key=f"e_meet_{i}", disabled=["stage"],
-                column_config={
-                    "stage": st.column_config.TextColumn("Tahap", width="medium"),
-                    "activity": st.column_config.TextColumn("Aktivitas", width="large"),
-                    "values": st.column_config.TextColumn("Nilai", width="medium"),
-                },
-            )
-
-        st.text_area("Asesmen & Refleksi", value=data["assessment_reflection"], key="e_ar")
-
-    st.divider()
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("📄 Siapkan DOCX", type="primary", use_container_width=True):
-            final = collect()
-            st.session_state["docx_bytes"] = export_docx(final, info)
-            st.success("File siap diunduh ⬇️")
-        if "docx_bytes" in st.session_state:
-            st.download_button(
-                "⬇️ Download DOCX",
-                data=st.session_state["docx_bytes"],
-                file_name=f"Modul_{info['topic'][:20]}.docx",
-                use_container_width=True,
-            )
-    with c2:
-        if st.button("🧹 Reset Halaman", use_container_width=True):
-            st.session_state["modul"] = None
-            st.session_state.pop("docx_bytes", None)
-            for k in list(st.session_state.keys()):
-                if (k.startswith("list_obj_") or k.startswith("e_obj_")
-                        or k.startswith("del_obj_") or k.startswith("add_obj_")):
-                    del st.session_state[k]
-            st.rerun()
-
-
-# =========================================================
-# FOOTER
-# =========================================================
-st.divider()
-current_year = datetime.date.today().year
-st.markdown(
-    f"""
-    <div style="
-        text-align: center;
-        padding: 18px 0 10px 0;
-        margin-top: 20px;
-        border-top: 1px solid rgba(128,128,128,0.2);
-        color: #8a8a8a;
-        font-size: 13px;
-        line-height: 1.6;
-    ">
-        © {current_year} <strong> Frederick Sensei </strong> — All Rights Reserved.<br>
-        <span style="font-size: 12px;">
-            Modul Ajar Generator (No-API Mode · CP dari CP_GRAPH)
-        </span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+# INSTRUKSI KELUARAN
+1. Hasilkan **JSON valid** saja (boleh dibungkus ```json ... ```).
+2. Ikuti schema persis berikut:
+{schema}
+3. `meetings` harus berisi tepat {len(meetings)} item, urut sesuai daftar MEETINGS di atas.
+4. Setiap meeting WAJIB punya 5 stages berurutan: Finding Out, Sorting Out, Going Further, Making Connections, Taking Action.
+5. Bahasa: Bahasa Indonesia (kecuali `jp`/`romaji` bila mata pelajaran bahasa asing).
+6. Jangan tambahkan komentar, penjelasan, atau teks di luar JSON.
+"""
