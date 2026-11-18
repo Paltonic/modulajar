@@ -4,7 +4,7 @@ import re
 from io import BytesIO
 from docx import Document
 from docx.shared import Pt, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX
 from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.enum.section import WD_ORIENT
 from docx.oxml.ns import qn
@@ -15,6 +15,19 @@ HEADER_FILL = "D9E1F2"
 
 # Cari logo di folder yang sama dengan file ini
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo_nakamura.png")
+
+# ---------- Highlight tags for Meaningful / Joyful / Mindful ----------
+TAG_STARTERS = [
+    ("Meaningful", WD_COLOR_INDEX.YELLOW),
+    ("Joyful",     WD_COLOR_INDEX.BRIGHT_GREEN),
+    ("Mindful",    WD_COLOR_INDEX.TURQUOISE),
+]
+
+# Backward compatibility for modules generated with the old prompt
+ML_PATTERN = re.compile(r"(meaningful\s+learning\s*:)", re.IGNORECASE)
+
+# Regex: numbered list start ("1. ", "2) ", ...) — used for indentation
+NUMBERED_LINE = re.compile(r'^\s*\d+[\.\)]\s')
 
 
 # =========================================================
@@ -27,17 +40,75 @@ def _set_cjk(run, font=JP_FONT, size=12):
     rFonts = rPr.get_or_add_rFonts()
     rFonts.set(qn("w:eastAsia"), font)
 
+
 def _shade_cell(cell, color_hex):
     tcPr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
     shd.set(qn("w:fill"), color_hex)
     tcPr.append(shd)
 
+
+def _add_run(p, text, bold=False, size=12, highlight=None):
+    """Tambah run ke paragraph. `highlight` = None or WD_COLOR_INDEX value."""
+    if not text:
+        return None
+    r = p.add_run(text)
+    r.bold = bold
+    r.font.name = "Arial"
+    r.font.size = Pt(size)
+    if highlight is not None:
+        r.font.highlight_color = highlight
+    if any(ord(c) > 0x3000 for c in text):
+        _set_cjk(r, size=size)
+    return r
+
+
+def _detect_tag(line):
+    """Return (color, position) where highlight should start, or (None, -1).
+
+    Recognises:
+      [Meaningful] ...   [Joyful] ...   [Mindful] ...
+      Meaningful: ...    Joyful: ...    Mindful: ...
+      Meaningful - ...   Joyful - ...   Mindful - ...
+      Meaningful Learning: ...   (legacy, always yellow)
+    """
+    stripped = line.lstrip()
+    offset = len(line) - len(stripped)
+
+    # 1. Bracketed or "Tag:" at start of line
+    for tag, color in TAG_STARTERS:
+        if re.match(r"^\[" + tag + r"\]", stripped, re.IGNORECASE):
+            return (color, offset)
+        if re.match(r"^" + tag + r"\s*[:\-]", stripped, re.IGNORECASE):
+            return (color, offset)
+
+    # 2. Bracketed tag inline (anywhere)
+    for tag, color in TAG_STARTERS:
+        m = re.search(r"\[" + tag + r"\]", line, re.IGNORECASE)
+        if m:
+            return (color, m.start())
+
+    # 3. Legacy "Meaningful Learning:"
+    m = ML_PATTERN.search(line)
+    if m:
+        return (WD_COLOR_INDEX.YELLOW, m.start())
+
+    return (None, -1)
+
+
 def _write_cell(cell, text, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, size=12):
+    """Write multi-line text into a cell.
+
+    - Numbered lines (1., 2., 3.) get a hanging indent so wrapped text
+      lines up with the text (not the number). This matches the style
+      requested in Contoh.docx.
+    - Lines that start with [Meaningful]/[Joyful]/[Mindful] are highlighted
+      with the corresponding colour.
+    """
     cell.text = ""
     text = str(text) if text is not None else ""
 
-    # Memisahkan penomoran 1. 2. 3. yang menyatu menjadi enter di Word
+    # Pisahkan penomoran 1. 2. 3. yang menyatu menjadi enter di Word
     text = re.sub(r'(?<!\n)\s*(\d+)[\.\)]\s+', r'\n\1. ', text).strip()
 
     lines = text.split("\n")
@@ -46,21 +117,36 @@ def _write_cell(cell, text, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, size=12):
         p.alignment = align
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after = Pt(0)
-        r = p.add_run(line)
-        r.bold = bold
-        r.font.name = "Arial"
-        r.font.size = Pt(size)
-        if any(ord(c) > 0x3000 for c in line):
-            _set_cjk(r, size=size)
+
+        # ---------- Indentasi nomor (hanging indent) ----------
+        if NUMBERED_LINE.match(line):
+            # Body text starts at 0.75 cm, number hangs back to 0.25 cm
+            p.paragraph_format.left_indent = Cm(0.75)
+            p.paragraph_format.first_line_indent = Cm(-0.5)
+
+        # ---------- Deteksi tag highlight ----------
+        color, pos = _detect_tag(line)
+        if color is not None:
+            if pos > 0:
+                _add_run(p, line[:pos], bold=bold, size=size)
+            _add_run(p, line[pos:], bold=bold, size=size, highlight=color)
+        else:
+            _add_run(p, line, bold=bold, size=size)
+
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
+
 def _bullets_from_list(items):
-    if not items: return "-"
+    if not items:
+        return "-"
     return "\n".join(f"- {x}" for x in items)
 
+
 def _numbered_from_list(items):
-    if not items: return "-"
+    if not items:
+        return "-"
     return "\n".join(f"{i + 1}. {x}" for i, x in enumerate(items))
+
 
 def _remove_table_borders(table):
     """Hilangkan semua border (untuk header logo + judul)."""
@@ -75,6 +161,55 @@ def _remove_table_borders(table):
         border.set(qn("w:color"), "auto")
         borders.append(border)
     tblPr.append(borders)
+
+
+def _add_highlight_legend(doc):
+    """Legend kecil di atas tabel meeting — jelaskan arti tiap warna."""
+    doc.add_paragraph()
+
+    p = doc.add_paragraph()
+    r = p.add_run("Highlight Legend — Planned Activities")
+    r.bold = True
+    r.font.name = "Arial"
+    r.font.size = Pt(11)
+
+    legend = [
+        ("[Meaningful]", WD_COLOR_INDEX.YELLOW,
+         "Relevan dengan kehidupan sehari-hari (relevant to daily life)"),
+        ("[Joyful]", WD_COLOR_INDEX.BRIGHT_GREEN,
+         "Menggembirakan dan memotivasi siswa (joyful & motivating)"),
+        ("[Mindful]", WD_COLOR_INDEX.TURQUOISE,
+         "Berpikir kritis dan melatih fokus (critical thinking & focus)"),
+    ]
+
+    t = doc.add_table(rows=len(legend), cols=2)
+    t.style = "Table Grid"
+    for i, (tag, color, desc) in enumerate(legend):
+        c_tag = t.cell(i, 0)
+        c_tag.text = ""
+        p_tag = c_tag.paragraphs[0]
+        p_tag.paragraph_format.space_before = Pt(0)
+        p_tag.paragraph_format.space_after = Pt(0)
+        r_tag = p_tag.add_run(tag)
+        r_tag.bold = True
+        r_tag.font.name = "Arial"
+        r_tag.font.size = Pt(10)
+        r_tag.font.highlight_color = color
+
+        c_desc = t.cell(i, 1)
+        c_desc.text = ""
+        p_desc = c_desc.paragraphs[0]
+        p_desc.paragraph_format.space_before = Pt(0)
+        p_desc.paragraph_format.space_after = Pt(0)
+        r_desc = p_desc.add_run(desc)
+        r_desc.font.name = "Arial"
+        r_desc.font.size = Pt(10)
+
+    for row in t.rows:
+        row.cells[0].width = Cm(4)
+        row.cells[1].width = Cm(21)
+
+    doc.add_paragraph()
 
 
 # =========================================================
@@ -140,8 +275,7 @@ def export_docx(data, info, logo_path=None):
     r.bold = True
     r.font.name = "Arial"
     r.font.size = Pt(24)
-    
-    # Terapkan lebar ke kedua sel agar proporsional (1:4.5)
+
     header_tbl.columns[0].width = Cm(4.5)
     header_tbl.columns[1].width = Cm(20.5)
     header_tbl.cell(0, 0).width = Cm(4.5)
@@ -217,22 +351,20 @@ def export_docx(data, info, logo_path=None):
         is_cp_row = ("learning outcomes" in label.lower()) or ("capaian pembelajaran" in label.lower())
         align = WD_ALIGN_PARAGRAPH.JUSTIFY if is_cp_row else WD_ALIGN_PARAGRAPH.LEFT
         _write_cell(t3.cell(i, 1), content, align=align)
-        
-    # Kunci tabel agar pas 100% lebar halaman (TIDAK GESER KE KANAN)
+
     tblPr = t3._tbl.tblPr
     tblW = OxmlElement('w:tblW')
     tblW.set(qn('w:w'), '5000')
     tblW.set(qn('w:type'), 'pct')
     tblPr.append(tblW)
-    
+
     layout = OxmlElement('w:tblLayout')
     layout.set(qn('w:type'), 'fixed')
     tblPr.append(layout)
-    
-    # Terapkan rasio 1 : 3 (6.5 cm : 19.5 cm)
+
     t3.columns[0].width = Cm(6)
     t3.columns[1].width = Cm(19)
-    
+
     for row in t3.rows:
         row.cells[0].width = Cm(6)
         row.cells[1].width = Cm(19)
@@ -302,6 +434,9 @@ def export_docx(data, info, logo_path=None):
             br.font.name = "Arial"
             br.font.size = Pt(12)
         doc.add_paragraph()
+
+    # ---------- Highlight Legend (before meeting tables) ----------
+    _add_highlight_legend(doc)
 
     # ---------- 5E / 6-Stage table per meeting ----------
     stage_desc = {
