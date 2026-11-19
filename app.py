@@ -430,7 +430,14 @@ if data:
             if not objs:
                 objs = ["-"]
 
-            meetings.append({**m, "stages": stages, "objectives": objs})
+            ar_val = st.session_state.get(f"e_ar_{i}", m.get("assessment_reflection", ""))
+
+            meetings.append({
+                **m, 
+                "stages": stages, 
+                "objectives": objs, 
+                "assessment_reflection": ar_val
+            })
 
         lo_edited = get("e_lo", data["learning_outcomes"])
 
@@ -444,7 +451,7 @@ if data:
             "subject_integration": {"subjects": si_subjects},
             "character_building": cb,
             "meetings": meetings,
-            "assessment_reflection": get("e_ar", data["assessment_reflection"]),
+            "assessment_reflection": get("e_ar_global", data.get("assessment_reflection", "-")),
         }
 
     tab1, tab2, tab3 = st.tabs(["📋 Tujuan & Konteks", "📖 Vocab & Karakter", "🔄 Inquiring Cycle"])
@@ -538,8 +545,14 @@ if data:
                     "values": st.column_config.TextColumn("Nilai", width="medium"),
                 },
             )
-
-        st.text_area("Asesmen & Refleksi", value=data["assessment_reflection"], key="e_ar")
+            
+            # Text area per meeting (Formative/Summative logic handled by AI prompt)
+            st.text_area(
+                f"Asesmen & Refleksi M{m['number']}", 
+                value=m.get("assessment_reflection", ""), 
+                key=f"e_ar_{i}",
+                height=100
+            )
 
     st.divider()
     c1, c2 = st.columns(2)
@@ -561,7 +574,8 @@ if data:
             st.session_state.pop("docx_bytes", None)
             for k in list(st.session_state.keys()):
                 if (k.startswith("list_obj_") or k.startswith("e_obj_")
-                        or k.startswith("del_obj_") or k.startswith("add_obj_")):
+                        or k.startswith("del_obj_") or k.startswith("add_obj_")
+                        or k.startswith("e_ar_")):
                     del st.session_state[k]
             st.rerun()
 

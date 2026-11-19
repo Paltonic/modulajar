@@ -152,8 +152,7 @@ Term / Semester   : {term}
 2. INFER Prior Knowledge, Key Vocabulary, Guiding Questions and Learning Objectives.
 3. Design ACTIVE, student-centred, inquiry-based activities.
 4. The "Tuning In" stage MUST begin with the Kiritsu Rei routine.
-5. The "assessment_reflection" MUST end with the Kiritsu closing routine.
-6. CHOOSE specific numbered activity points (1, 2, 3, etc.) inside the "activity" 
+5. CHOOSE specific numbered activity points (1, 2, 3, etc.) inside the "activity" 
    fields that best represent Meaningful, Joyful, and Mindful learning.
    - Prefix those chosen points DIRECTLY with [Meaningful], [Joyful], or [Mindful].
    - Do NOT create separate lines at the bottom. Integrate the tags into the actual activities.
@@ -183,10 +182,10 @@ Term / Semester   : {term}
          {{"stage": "Going Further",      "activity": "1. [Meaningful] Students investigate...\\n2. [Joyful] Students solve a game-based challenge...\\n3. Students extend...", "values": "<ONE dimension OR hyphen>"}},
          {{"stage": "Making Conclusions", "activity": "1. [Mindful] Students present and evaluate...\\n2. Students reflect...\\n3. Students summarise...", "values": "<ONE dimension OR hyphen>"}},
          {{"stage": "Taking Actions",     "activity": "1. [Meaningful] Students apply the concept to their daily life...\\n2. Students share...\\n3. Students commit...", "values": "<ONE dimension OR hyphen>"}}
-       ]
+       ],
+       "assessment_reflection": "Formative: ... OR Reflection: [Questions] \\n\\nClosing routine:\\n{kiritsu_closing}"
      }}
-  ],
-  "assessment_reflection": "Formative: ...\\nSummative: ...\\nReflection: ...\\n\\nClosing routine:\\n{kiritsu_closing}"
+  ]
 }}
 
 === RULES ===
@@ -201,6 +200,14 @@ Term / Semester   : {term}
 - The FIRST activity of "Tuning In" MUST be the Kiritsu opening routine.
 - "values" MUST be EXACTLY ONE dimension from: {nakamura_list} OR "-"
 - The "meetings" array MUST contain EXACTLY {n_meetings} object(s).
+
+- ASSESSMENT & REFLECTION RULES PER MEETING:
+  1. For Meeting 1 to {n_meetings_minus_1}: 
+     - Use EITHER "Formative: [description of observation/checklist] + Closing routine:\n{kiritsu_closing}"
+     - OR "Reflection: [1-2 questions asked to students] + Closing routine:\n{kiritsu_closing}"
+  2. For the LAST meeting (Meeting {n_meetings}): 
+     - Use "Summative: [description of final practical/written assessment] + Closing Meeting:\n{kiritsu_closing}". 
+     - DO NOT use Formative or Reflection for this final meeting.
 """
 
 
@@ -221,12 +228,16 @@ def build_modul_prompt(teacher, subject, class_level, phase, duration, term,
     )
 
     ref = reference_text[:6000] if reference_text else "(No document provided)"
+    n_meetings = len(meetings)
+    n_meetings_minus_1 = max(1, n_meetings - 1)
+    
     return PROMPT_TEMPLATE.format(
         teacher=teacher, subject=subject, class_level=class_level,
         phase=phase, duration=duration, term=term,
         meetings_input=meetings_str, reference_text=ref,
         cp_block=cp_block,
-        n_meetings=len(meetings),
+        n_meetings=n_meetings,
+        n_meetings_minus_1=n_meetings_minus_1,
         nakamura_list=NAKAMURA_LIST_STR,
         kiritsu_opening=KIRITSU_OPENING,
         kiritsu_closing=KIRITSU_CLOSING,
@@ -368,6 +379,9 @@ def _normalize(data, meetings_input):
         objs = _as_list(src.get("objectives"))
         while len(objs) < 3:
             objs.append("-")
+            
+        # Ambil assessment per meeting (fallback ke root jika AI salah naruh)
+        ar_text = _fix_numbering(_as_text(src.get("assessment_reflection") or d.get("assessment_reflection"), "-"))
 
         normalized_meetings.append({
             "number": int(src.get("number") or (i + 1)),
@@ -376,6 +390,7 @@ def _normalize(data, meetings_input):
             "day_date": _as_text(src.get("day_date") or src.get("date"), m_in.get("date") or "TBD"),
             "objectives": objs,
             "stages": stages,
+            "assessment_reflection": ar_text,
         })
 
     kv_raw = d.get("key_vocabulary") or []
@@ -394,7 +409,8 @@ def _normalize(data, meetings_input):
         else:
             kv.append({"jp": _as_text(item, ""), "romaji": "", "arti": ""})
 
-    ar_text = _fix_numbering(_as_text(d.get("assessment_reflection"), "-"))
+    # Global assessment_reflection (bisa kosong jika semua sudah per-meeting)
+    global_ar_text = _fix_numbering(_as_text(d.get("assessment_reflection"), "-"))
 
     return {
         "learning_outcomes": "",
@@ -406,5 +422,5 @@ def _normalize(data, meetings_input):
         "subject_integration": _normalize_subject_integration(d.get("subject_integration")),
         "character_building": cb,
         "meetings": normalized_meetings,
-        "assessment_reflection": ar_text,
+        "assessment_reflection": global_ar_text,
     }

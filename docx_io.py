@@ -64,14 +64,7 @@ def _add_run(p, text, bold=False, size=12, highlight=None):
 
 
 def _detect_tag(line):
-    """Return (color, position) where highlight should start, or (None, -1).
-
-    Recognises:
-      [Meaningful] ...   [Joyful] ...   [Mindful] ...
-      Meaningful: ...    Joyful: ...    Mindful: ...
-      Meaningful - ...   Joyful - ...   Mindful - ...
-      Meaningful Learning: ...   (legacy, always yellow)
-    """
+    """Return (color, position) where highlight should start, or (None, -1)."""
     stripped = line.lstrip()
     offset = len(line) - len(stripped)
 
@@ -97,14 +90,7 @@ def _detect_tag(line):
 
 
 def _write_cell(cell, text, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, size=12):
-    """Write multi-line text into a cell.
-
-    - Numbered lines (1., 2., 3.) get a hanging indent so wrapped text
-      lines up with the text (not the number). This matches the style
-      requested in Contoh.docx.
-    - Lines that start with [Meaningful]/[Joyful]/[Mindful] are highlighted
-      with the corresponding colour.
-    """
+    """Write multi-line text into a cell."""
     cell.text = ""
     text = str(text) if text is not None else ""
 
@@ -120,7 +106,6 @@ def _write_cell(cell, text, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, size=12):
 
         # ---------- Indentasi nomor (hanging indent) ----------
         if NUMBERED_LINE.match(line):
-            # Body text starts at 0.75 cm, number hangs back to 0.25 cm
             p.paragraph_format.left_indent = Cm(0.75)
             p.paragraph_format.first_line_indent = Cm(-0.5)
 
@@ -238,7 +223,8 @@ def export_docx(data, info, logo_path=None):
     # ---------- Header: Logo + Judul (sejajar) ----------
     year = info.get("academic_year", "2026/2027")
     jenjang = info.get("jenjang", "SMA")
-    title_text = f"Modul Ajar Academic Year {year} {jenjang} Swasta Nakamura School"
+    
+    title_text = f"Modul Ajar Academic Year {year}\n{jenjang} Swasta Nakamura School"
 
     logo_file = logo_path or LOGO_PATH
     header_tbl = doc.add_table(rows=1, cols=2)
@@ -269,12 +255,7 @@ def export_docx(data, info, logo_path=None):
     # Kanan: judul (Lebar: 20.5 cm)
     title_cell = header_tbl.cell(0, 1)
     title_cell.width = Cm(20.5)
-    p = title_cell.paragraphs[0]
-    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    r = p.add_run(title_text)
-    r.bold = True
-    r.font.name = "Arial"
-    r.font.size = Pt(24)
+    _write_cell(title_cell, title_text, bold=True, size=24, align=WD_ALIGN_PARAGRAPH.LEFT)
 
     header_tbl.columns[0].width = Cm(4.5)
     header_tbl.columns[1].width = Cm(20.5)
@@ -317,12 +298,6 @@ def export_docx(data, info, logo_path=None):
     doc.add_paragraph()
 
     # ---------- Content table: CP / PK / GQ / EU / KV / RM ----------
-    pk_header = (
-        "Prior Knowledge\n"
-        "(What have learners already covered or what do they need to know in order "
-        "to access this lesson? How will they check their previous learning?)"
-    )
-
     kv_items = data.get("key_vocabulary", []) or []
     kv_text = "\n".join(
         f"- {v.get('jp', '')}  ({v.get('romaji', '')})  —  {v.get('arti', '')}"
@@ -333,7 +308,7 @@ def export_docx(data, info, logo_path=None):
 
     content_rows = [
         ("Learning Outcomes", cp_text),
-        (pk_header, _bullets_from_list(data.get("prior_knowledge"))),
+        ("Prior Knowledge", _bullets_from_list(data.get("prior_knowledge"))), # Marker khusus
         ("Guiding/Essential Questions", _numbered_from_list(data.get("guiding_questions"))),
         ("Enduring Understanding", data.get("enduring_understanding", "-") or "-"),
         ("Key Vocabulary", kv_text),
@@ -346,11 +321,36 @@ def export_docx(data, info, logo_path=None):
     t3.allow_autofit = False
 
     for i, (label, content) in enumerate(content_rows):
-        _write_cell(t3.cell(i, 0), label, bold=True)
-        _shade_cell(t3.cell(i, 0), HEADER_FILL)
+        cell_label = t3.cell(i, 0)
+        cell_content = t3.cell(i, 1)
+        
+        # Cek jika ini adalah baris Prior Knowledge
+        if label == "Prior Knowledge":
+            cell_label.text = ""
+            p = cell_label.paragraphs[0]
+            p.paragraph_format.space_before = Pt(0)
+            p.paragraph_format.space_after = Pt(0)
+            
+            # Judul Ukuran 12
+            r_title = p.add_run("Prior Knowledge\n")
+            r_title.bold = True
+            r_title.font.name = "Arial"
+            r_title.font.size = Pt(12)
+            
+            # Keterangan dalam kurung Ukuran 7
+            r_desc = p.add_run("(What have learners already covered or what do they need to know in order to access this lesson? How will they check their previous learning?)")
+            r_desc.font.name = "Arial"
+            r_desc.font.size = Pt(7)
+            
+            cell_label.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+        else:
+            _write_cell(cell_label, label, bold=True)
+            
+        _shade_cell(cell_label, HEADER_FILL)
+        
         is_cp_row = ("learning outcomes" in label.lower()) or ("capaian pembelajaran" in label.lower())
         align = WD_ALIGN_PARAGRAPH.JUSTIFY if is_cp_row else WD_ALIGN_PARAGRAPH.LEFT
-        _write_cell(t3.cell(i, 1), content, align=align)
+        _write_cell(cell_content, content, align=align)
 
     tblPr = t3._tbl.tblPr
     tblW = OxmlElement('w:tblW')
@@ -496,10 +496,15 @@ def export_docx(data, info, logo_path=None):
         _write_cell(table.cell(8, 0), "Assessment & Reflection", bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
         _write_cell(table.cell(8, 1), "Assessment and Student Reflection")
         cell_assess = table.cell(8, 2).merge(table.cell(8, 3))
-        _write_cell(cell_assess, data.get("assessment_reflection", "-") or "-")
+        
+        ar_content = m.get("assessment_reflection") or data.get("assessment_reflection", "-")
+        _write_cell(cell_assess, ar_content or "-")
 
         doc.add_paragraph()
 
+    # ---------- Signatures (DIPISAH KE HALAMAN BARU) ----------
+    doc.add_page_break()  # <--- Perintah untuk pindah halaman
+    
     # ---------- Note ----------
     p = doc.add_paragraph()
     r = p.add_run("Note:")
@@ -519,8 +524,7 @@ def export_docx(data, info, logo_path=None):
         br = bp.add_run(note)
         br.font.name = "Arial"
         br.font.size = Pt(12)
-
-    # ---------- Signatures ----------
+    
     doc.add_paragraph()
     p_date = doc.add_paragraph()
     p_date.alignment = WD_ALIGN_PARAGRAPH.RIGHT
